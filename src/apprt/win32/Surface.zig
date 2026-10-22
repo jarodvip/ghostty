@@ -137,12 +137,28 @@ pub fn close(self: *Self, process_active: bool) void {
     _ = win32.user32.DestroyWindow(self.hwnd);
 }
 
-/// Called from WndProc on WM_CLOSE to actually tear down the window.
+/// Called from WndProc on WM_DESTROY to tear down the window and
+/// release all resources. This is the counterpart of the GTK surface
+/// finalize path: the core surface must be deinitialized here so that
+/// shared resources (e.g. font grids) are released immediately when a
+/// window closes, not only at app termination.
 pub fn destroySurface(self: *Self) void {
-    // Remove from the core app's surface list.
     _ = self.core_surface orelse return;
+
+    // Remove from the core app's surface list.
     self.app.core_app.deleteSurface(self);
-    self.app.windows_open = false;
+
+    // Remove from our own list.
+    if (std.mem.indexOfScalar(*Self, self.app.surfaces.items, self)) |idx| {
+        _ = self.app.surfaces.swapRemove(idx);
+    }
+
+    self.app.windows_open = self.app.surfaces.items.len > 0;
+
+    // Deinit the apprt surface (frees the core surface and title) and
+    // release the structure. The WndProc must not touch us after this.
+    self.deinit();
+    self.app.alloc.destroy(self);
 }
 
 /// Returns the content scale of the surface.

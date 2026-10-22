@@ -32,11 +32,15 @@ core_app: *CoreApp,
 alloc: Allocator,
 config: Config,
 hinstance: win32.HINSTANCE,
-hwnd: win32.HWND,
-surface: *Surface,
 
-/// The number of open windows. We only support one window for now, but
-/// this keeps the quit logic simple.
+/// The primary window handle, used for wakeups and the message loop.
+hwnd: win32.HWND,
+
+/// All open surfaces (one per window).
+surfaces: std.ArrayListUnmanaged(*Surface) = .empty,
+
+/// Number of open windows. Used to decide whether to start the quit
+/// timer when the last window closes.
 windows_open: bool,
 
 pub fn init(
@@ -51,7 +55,6 @@ pub fn init(
         .config = undefined,
         .hinstance = undefined,
         .hwnd = undefined,
-        .surface = undefined,
         .windows_open = false,
     };
 
@@ -88,7 +91,14 @@ pub fn init(
         }
     }
 
-    // Create the main window.
+    // Create the main window and its surface.
+    try self.newSurface();
+}
+
+/// Create a new window and its associated apprt surface. The first
+/// window created by this function also becomes the app's primary
+/// window (`hwnd`), used for wakeups.
+fn newSurface(self: *App) !void {
     const hwnd = win32.user32.CreateWindowExW(
         0,
         &class_name,
@@ -100,17 +110,18 @@ pub fn init(
         600,
         null,
         null,
-        hinstance,
+        self.hinstance,
         null,
     ) orelse return error.CreateWindowFailed;
-    self.hwnd = hwnd;
 
-    // Create the apprt surface for this window.
+    // Allocate the apprt surface.
     const surface = try self.alloc.create(Surface);
     errdefer self.alloc.destroy(surface);
+    errdefer _ = win32.user32.DestroyWindow(hwnd);
+
+    // Initialize the apprt surface and its core surface.
     try surface.init(self, hwnd);
-    self.surface = surface;
-    self.windows_open = true;
+    errdefer surface.deinit();
 
     // Store the surface pointer in the window's user data so the
     // WndProc can find it.
@@ -119,6 +130,13 @@ pub fn init(
         win32.user32.GWLP_USERDATA,
         @intCast(@intFromPtr(surface)),
     );
+
+    // Track the surface.
+    try self.surfaces.append(self.alloc, surface);
+    self.windows_open = true;
+
+    // The first window is the primary window for wakeups.
+    if (self.surfaces.items.len == 1) self.hwnd = hwnd;
 
     // Show the window.
     _ = win32.user32.ShowWindow(hwnd, win32.user32.SW_SHOW);
@@ -142,21 +160,14 @@ pub fn run(self: *App) !void {
 }
 
 pub fn terminate(self: *App) void {
-    // Destroy the window if still open. This triggers WM_DESTROY which
-    // removes the surface from the core app's list.
-    if (self.windows_open) {
-        _ = win32.user32.DestroyWindow(self.hwnd);
-        self.windows_open = false;
+    // Destroy any remaining windows. Each WM_DESTROY removes and
+    // deinitializes its surface via destroySurface, so after this loop
+    // the surfaces list is empty.
+    for (self.surfaces.items) |s| {
+        _ = win32.user32.DestroyWindow(s.hwnd);
     }
-
-    // The surface may have been removed from the core app's surface list
-    // by destroySurface, in which case the core app will not call its
-    // deinit. We must deinit it ourselves to release the core surface
-    // and title memory, then free the structure.
-    if (@as(?*Surface, self.surface)) |s| {
-        s.deinit();
-        self.alloc.destroy(s);
-    }
+    self.surfaces.deinit(self.alloc);
+    self.windows_open = false;
     self.config.deinit();
 }
 
@@ -174,29 +185,65 @@ pub fn performAction(
 ) !bool {
     switch (action) {
         .quit => {
-            _ = win32.user32.PostMessageW(self.hwnd, win32.WM_CLOSE, 0, 0);
+            // Close all windows to quit.
+            for (self.surfaces.items) |s| {
+                _ = win32.user32.PostMessageW(s.hwnd, win32.WM_CLOSE, 0, 0);
+            }
             return true;
         },
 
         .close_all_windows => {
-            _ = win32.user32.PostMessageW(self.hwnd, win32.WM_CLOSE, 0, 0);
+            for (self.surfaces.items) |s| {
+                _ = win32.user32.PostMessageW(s.hwnd, win32.WM_CLOSE, 0, 0);
+            }
             return true;
         },
 
         .new_window => {
-            // TODO: multiple windows.
-            log.warn("new_window is not yet implemented in the Win32 apprt", .{});
+            try self.newSurface();
+            return true;
+        },
+
+        .new_tab => {
+            // The Win32 apprt does not have tabs; open a new window.
+            try self.newSurface();
+            return true;
+        },
+
+        .new_split => {
+            // Splits are not yet implemented in the Win32 apprt.
             return false;
         },
 
-        .new_tab, .new_split, .close_tab => {
-            // Not yet implemented.
-            return false;
+        .close_tab => {
+            // Close the surface's window. "other"/"right" are not
+            // meaningful without tabs; only .this is supported.
+            switch (value) {
+                .this => switch (target) {
+                    .surface => |s| {
+                        const rt_surface: *Surface = @alignCast(@ptrCast(s.rt_surface));
+                        _ = win32.user32.PostMessageW(rt_surface.hwnd, win32.WM_CLOSE, 0, 0);
+                    },
+                    .app => {},
+                },
+                .other, .right => return false,
+            }
+            return true;
         },
 
         .close_window => {
             switch (target) {
-                .app => _ = win32.user32.PostMessageW(self.hwnd, win32.WM_CLOSE, 0, 0),
+                .app => {
+                    // Close the focused window, or all if none focused.
+                    if (self.core_app.focusedSurface()) |fs| {
+                        const rt_surface: *Surface = @alignCast(@ptrCast(fs.rt_surface));
+                        _ = win32.user32.PostMessageW(rt_surface.hwnd, win32.WM_CLOSE, 0, 0);
+                    } else {
+                        for (self.surfaces.items) |s| {
+                            _ = win32.user32.PostMessageW(s.hwnd, win32.WM_CLOSE, 0, 0);
+                        }
+                    }
+                },
                 .surface => |s| {
                     const rt_surface: *Surface = @alignCast(@ptrCast(s.rt_surface));
                     _ = win32.user32.PostMessageW(rt_surface.hwnd, win32.WM_CLOSE, 0, 0);

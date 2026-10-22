@@ -85,13 +85,43 @@ pub fn keyEvent(
             else => .unidentified,
         };
 
+    // Compute the unshifted codepoint using ToUnicode with an empty
+    // keyboard state (no modifiers). This lets Ghostty's unicode-based
+    // keybindings (e.g. `ctrl+shift+n=new_window`) match the physical
+    // key's base character regardless of held modifiers.
+    const unshifted: u21 = if (unshifted_codepoint != 0)
+        unshifted_codepoint
+    else
+        unshiftedCodepoint(vk, scan_code);
+
     return .{
         .action = action,
         .key = key_final,
         .mods = mods(),
         .utf8 = utf8,
-        .unshifted_codepoint = unshifted_codepoint,
+        .unshifted_codepoint = unshifted,
     };
+}
+
+/// Compute the unshifted character produced by a virtual key + scan
+/// code using ToUnicode with no modifiers held.
+fn unshiftedCodepoint(vk: i32, scan_code: u32) u21 {
+    var key_state: [256]u8 = @splat(0);
+    var buf: [4]u16 = undefined;
+    const n = win32.user32.ToUnicode(
+        @intCast(vk),
+        @intCast(scan_code),
+        &key_state,
+        &buf,
+        buf.len,
+        0,
+    );
+    if (n <= 0) return 0;
+    // A single UTF-16 code unit in the BMP (not a surrogate) is the
+    // unshifted codepoint.
+    const cp = buf[0];
+    if (std.unicode.utf16IsHighSurrogate(cp) or std.unicode.utf16IsLowSurrogate(cp)) return 0;
+    return cp;
 }
 
 /// Convert a UTF-16 code unit from WM_CHAR into UTF-8. This handles

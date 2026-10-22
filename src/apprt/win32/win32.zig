@@ -203,6 +203,7 @@ pub const user32 = struct {
     pub extern "user32" fn GetWindowTextW(hWnd: HWND, lpString: LPWSTR, nMaxCount: c_int) c_int;
     pub extern "user32" fn SetFocus(hWnd: ?HWND) ?HWND;
     pub extern "user32" fn GetKeyState(nVirtKey: i32) i16;
+    pub extern "user32" fn GetKeyboardState(lpKeyState: [*]u8) BOOL;
     pub extern "user32" fn MapVirtualKeyW(uCode: UINT, uMapType: UINT) UINT;
     pub extern "user32" fn GetCursorPos(lpPoint: *POINT) BOOL;
     pub extern "user32" fn ScreenToClient(hWnd: HWND, lpPoint: *POINT) BOOL;
