@@ -508,6 +508,11 @@ fn wndProc(
             return 0;
         },
 
+        win32.WM_APP_CLIPBOARD_READ => {
+            if (surface) |s| s.completeClipboardPending();
+            return 0;
+        },
+
         else => {},
     }
 

@@ -53,6 +53,15 @@ focused: bool = false,
 /// The saved high surrogate from a previous WM_CHAR, if any.
 surrogate_high: ?u16 = null,
 
+/// A clipboard read that was requested and is waiting to be delivered
+/// to the core surface on the main thread.
+clipboard_pending: ?ClipboardPending = null,
+
+const ClipboardPending = struct {
+    req: apprt.ClipboardRequest,
+    data: []u8,
+};
+
 /// Initialize the apprt surface and the core surface.
 pub fn init(self: *Self, app: *App, hwnd: win32.HWND) !void {
     self.* = .{
@@ -109,6 +118,8 @@ pub fn init(self: *Self, app: *App, hwnd: win32.HWND) !void {
 }
 
 pub fn deinit(self: *Self) void {
+    if (self.clipboard_pending) |p| self.app.alloc.free(p.data);
+    self.clipboard_pending = null;
     if (self.core_surface) |s| {
         s.deinit();
         self.app.alloc.destroy(s);
@@ -220,8 +231,11 @@ pub fn supportsClipboard(
     return clipboard.supports(clipboard_type);
 }
 
-/// Request clipboard contents. On Windows we read synchronously and
-/// immediately complete the request.
+/// Request clipboard contents. The Win32 clipboard API is synchronous,
+/// so we read the data here and then deliver it to the core surface on
+/// the next message-loop iteration via a custom window message. This
+/// keeps the completion out of the caller's stack (matching the
+/// asynchronous contract of `apprt.ClipboardReadResult.started`).
 pub fn clipboardRequest(
     self: *Self,
     clipboard_type: apprt.Clipboard,
@@ -233,13 +247,31 @@ pub fn clipboardRequest(
 
     const alloc = self.app.alloc;
     const data = try clipboard.read(alloc) orelse return .unavailable;
-    defer alloc.free(data);
 
-    try self.core().completeClipboardRequest(
-        state,
-        .{ .contents = &.{.{ .mime = "text/plain", .data = data }} },
-    );
+    // Cancel any previous pending read (shouldn't normally happen).
+    if (self.clipboard_pending) |p| alloc.free(p.data);
+    self.clipboard_pending = .{ .req = state, .data = data };
+
+    // Wake up the message loop so the pending read is delivered.
+    _ = win32.user32.PostMessageW(self.hwnd, win32.WM_APP_CLIPBOARD_READ, 0, 0);
     return .started;
+}
+
+/// Complete a clipboard read that was posted to the message loop. This
+/// runs on the main thread and delivers the data to the core surface.
+pub fn completeClipboardPending(self: *Self) void {
+    const pending = self.clipboard_pending orelse return;
+    defer {
+        self.app.alloc.free(pending.data);
+        self.clipboard_pending = null;
+    }
+
+    self.core().completeClipboardRequest(
+        pending.req,
+        .{ .contents = &.{.{ .mime = "text/plain", .data = pending.data }} },
+    ) catch |err| {
+        log.warn("failed to complete clipboard request err={}", .{err});
+    };
 }
 
 /// Write clipboard contents.

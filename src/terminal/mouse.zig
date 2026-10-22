@@ -87,6 +87,7 @@ pub const Shape = enum(c_int) {
                 .{ .name = "GhosttyMouseShape" },
             ),
 
+            .win32 => void,
             .none => void,
         };
     };

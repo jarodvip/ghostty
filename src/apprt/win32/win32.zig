@@ -132,6 +132,11 @@ pub const WM_MOUSELEAVE: UINT = 0x02A3;
 pub const WM_DPICHANGED: UINT = 0x02E0;
 pub const WM_APP: UINT = 0x8000;
 
+/// Custom message posted to the app's primary window when a clipboard
+/// read request is complete and should be delivered to the core
+/// surface on the main thread.
+pub const WM_APP_CLIPBOARD_READ: UINT = WM_APP + 1;
+
 // Virtual key codes (subset used for modifiers)
 pub const VK_SHIFT: i32 = 0x10;
 pub const VK_CONTROL: i32 = 0x11;
