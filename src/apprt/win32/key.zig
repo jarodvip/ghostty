@@ -1,0 +1,104 @@
+//! Mapping of Win32 virtual key codes and scan codes to Ghostty's
+//! layout-independent `input.Key` enum, plus helper to build `input.KeyEvent`.
+
+const std = @import("std");
+const builtin = @import("builtin");
+const input = @import("../../input.zig");
+const keycodes = @import("../../input/keycodes.zig");
+const win32 = @import("win32.zig");
+
+/// Map a Windows scan code to a Ghostty Key. Returns `.unidentified`
+/// if no mapping is known.
+pub fn fromScanCode(scan_code: u32) input.Key {
+    // The Windows "native" column in keycodes.zig contains scan codes.
+    for (keycodes.entries) |entry| {
+        if (entry.native == scan_code) return entry.key;
+    }
+    return .unidentified;
+}
+
+/// Build the `input.Mods` for the current keyboard state.
+pub fn mods() input.Mods {
+    var result: input.Mods = .{};
+
+    // GetKeyState returns the state of the key at the time of the
+    // message; it also reports toggle state in the low bit which we
+    // don't need here.
+    if (isKeyDown(win32.VK_SHIFT)) result.shift = true;
+    if (isKeyDown(win32.VK_CONTROL)) result.ctrl = true;
+    if (isKeyDown(win32.VK_MENU)) result.alt = true;
+    if (isKeyDown(win32.VK_LWIN) or isKeyDown(win32.VK_RWIN)) result.super = true;
+
+    if (isKeyToggled(win32.VK_CAPITAL)) result.caps_lock = true;
+    if (isKeyToggled(win32.VK_NUMLOCK)) result.num_lock = true;
+
+    // Side detection.
+    if (isKeyDown(win32.VK_LSHIFT)) result.sides.shift = .left;
+    if (isKeyDown(win32.VK_RSHIFT)) result.sides.shift = .right;
+    if (isKeyDown(win32.VK_LCONTROL)) result.sides.ctrl = .left;
+    if (isKeyDown(win32.VK_RCONTROL)) result.sides.ctrl = .right;
+    if (isKeyDown(win32.VK_LMENU)) result.sides.alt = .left;
+    if (isKeyDown(win32.VK_RMENU)) result.sides.alt = .right;
+
+    return result;
+}
+
+/// Returns true if the given virtual key is currently down.
+fn isKeyDown(vk: i32) bool {
+    const state = win32.user32.GetKeyState(vk);
+    const ustate: u16 = @bitCast(state);
+    return (ustate & 0x8000) != 0;
+}
+
+/// Returns true if the given toggle key (CapsLock, NumLock) is on.
+fn isKeyToggled(vk: i32) bool {
+    const state = win32.user32.GetKeyState(vk);
+    return (state & 0x0001) != 0;
+}
+
+/// Convert the raw `lParam` of a WM_KEYDOWN/WM_KEYUP message into a
+/// `input.KeyEvent`. The caller supplies the UTF-8 text (if any) that
+/// the key produced, e.g. from WM_CHAR.
+pub fn keyEvent(
+    action: input.Action,
+    vk: i32,
+    lparam: win32.LPARAM,
+    utf8: []const u8,
+    unshifted_codepoint: u21,
+) input.KeyEvent {
+    // The scan code is in bits 16..23 of lParam.
+    const lp: u64 = @bitCast(lparam);
+    const scan_code: u32 = @intCast((lp >> 16) & 0xFF);
+    const key = fromScanCode(scan_code);
+
+    // If the scan code didn't map (e.g. some special keys), fall back
+    // to the virtual key code for a few common cases.
+    const key_final: input.Key = if (key != .unidentified)
+        key
+    else
+        switch (vk) {
+            win32.VK_SHIFT => fromScanCode(if (isKeyDown(win32.VK_LSHIFT)) 0x2A else 0x36),
+            win32.VK_CONTROL => fromScanCode(if (isKeyDown(win32.VK_LCONTROL)) 0x1D else 0x1D),
+            win32.VK_MENU => fromScanCode(0x38),
+            win32.VK_LWIN => fromScanCode(0x5B),
+            win32.VK_RWIN => fromScanCode(0x5C),
+            else => .unidentified,
+        };
+
+    return .{
+        .action = action,
+        .key = key_final,
+        .mods = mods(),
+        .utf8 = utf8,
+        .unshifted_codepoint = unshifted_codepoint,
+    };
+}
+
+/// Convert a UTF-16 code unit from WM_CHAR into UTF-8. This handles
+/// only single code units; surrogate pairs arrive as two WM_CHAR
+/// messages and are combined by the caller if needed.
+pub fn utf16ToUtf8(alloc: std.mem.Allocator, code_unit: u16) ![]u8 {
+    var buf: [4]u8 = undefined;
+    const len = std.unicode.utf16LeToUtf8(&buf, &.{code_unit}) catch return "";
+    return try alloc.dupe(u8, buf[0..len]);
+}
