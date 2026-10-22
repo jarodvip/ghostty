@@ -2,6 +2,7 @@
 pub const OpenGL = @This();
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const gl = @import("opengl");
 const egl = gl.egl;
@@ -47,51 +48,41 @@ blending: configpkg.Config.AlphaBlending,
 /// The shared render device.
 device: *const Device,
 
-egl_context: *gl.egl.Context,
+/// The rendering context for this surface. The type depends on the
+/// platform (EGL on Linux, WGL on Windows); see Device.Context.
+context: Device.Context,
 
 pub fn init(
     alloc: Allocator,
     device: *const Device,
     opts: rendererpkg.Options,
 ) !OpenGL {
-    const display = device.display;
-
-    // Bind to OpenGL API explicitly before we create the context,
-    // as otherwise it might fallback to OpenGL ES
-    try egl.bindApi(egl.c.EGL_OPENGL_API);
-
     // Create our context. Contexts are surface-scoped because a
     // context can only be current on one thread at a time.
-    const context = egl.Context.create(display, device.config, null, &.{
-        egl.c.EGL_CONTEXT_MAJOR_VERSION,       MIN_VERSION_MAJOR,
-        egl.c.EGL_CONTEXT_MINOR_VERSION,       MIN_VERSION_MINOR,
-        egl.c.EGL_CONTEXT_OPENGL_PROFILE_MASK, egl.c.EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT,
-    }) catch |err| {
-        log.warn("failed to create EGL context err={}", .{err});
-        return err;
-    };
-    errdefer context.destroy(display) catch {};
+    const context = try device.createContext(alloc);
+    errdefer device.destroyContext(context);
 
-    display.makeCurrent(null, null, context) catch |err| {
-        log.warn("failed to make EGL context current err={}", .{err});
+    // Make the context current so we can verify it.
+    device.makeCurrent(context) catch |err| {
+        log.warn("failed to make GL context current err={}", .{err});
         return err;
     };
 
     // Release current so that the main thread
     // doesn't hold onto the GL context forever.
-    defer display.releaseCurrent();
+    device.releaseCurrent();
 
     return .{
         .alloc = alloc,
         .blending = opts.config.blending,
         .device = device,
-        .egl_context = context,
+        .context = context,
     };
 }
 
 pub fn deinit(self: *OpenGL) void {
-    self.device.display.releaseCurrent();
-    self.egl_context.destroy(self.device.display) catch {};
+    self.device.releaseCurrent();
+    self.device.destroyContext(self.context);
     self.* = undefined;
 }
 
@@ -195,21 +186,21 @@ fn prepareContext(getProcAddress: anytype) !void {
 }
 
 /// Callback called by renderer.Thread when it begins. Called on the render
-/// thread. The EGL context was created at `init` time on the main thread;
+/// thread. The context was created at `init` time on the main thread;
 /// here we (re)bind it to this thread and load the thread-local glad
 /// function pointers so all subsequent GL work on this thread is valid.
 pub fn threadEnter(self: *OpenGL, surface: *apprt.Surface) !void {
     _ = surface;
-    try self.device.display.makeCurrent(null, null, self.egl_context);
+    try self.device.makeCurrent(self.context);
     // Load our function pointers for this thread's threadlocal.
-    try prepareContext(&gl.egl.getProcAddress);
+    try prepareContext(&Device.getProcAddress);
 }
 
 /// Callback called by renderer.Thread when it exits. Called on the render
 /// thread; unbinds the context from this thread so it can be destroyed on
 /// the main thread.
 pub fn threadExit(self: *OpenGL) void {
-    self.device.display.releaseCurrent();
+    self.device.releaseCurrent();
     gl.glad.unload();
 }
 
@@ -280,12 +271,20 @@ pub fn present(
     presentation_health: rendererpkg.Health,
 ) !ExportedFrame {
     // We only export DMABUFs when the apprt can present them.
-    // Otherwise, use CPU buffers.
-    if (presentation_health == .healthy) {
-        if (target.exportDmabuf(self.device.display, self.egl_context)) |dmabuf| {
-            return .{ .dmabuf = dmabuf };
-        } else |_| {
-            log.warn("failed to export DMABUF, falling back to CPU presentation", .{});
+    // Otherwise, use CPU buffers. Windows has no dma-buf so it always
+    // uses the CPU readback path.
+    if (comptime builtin.target.os.tag != .windows) {
+        if (presentation_health == .healthy) {
+            const display = self.device.display();
+            const context: *egl.Context = switch (self.context) {
+                .egl => |ctx| ctx,
+                .wgl => unreachable,
+            };
+            if (target.exportDmabuf(display, context)) |dmabuf| {
+                return .{ .dmabuf = dmabuf };
+            } else |_| {
+                log.warn("failed to export DMABUF, falling back to CPU presentation", .{});
+            }
         }
     }
 
