@@ -502,6 +502,30 @@ fn wndProc(
             return 0;
         },
 
+        win32.WM_IME_STARTCOMPOSITION => {
+            // Nothing to do; preedit updates come via
+            // WM_IME_COMPOSITION.
+            return 0;
+        },
+
+        win32.WM_IME_COMPOSITION => {
+            if (surface) |s| {
+                s.imeComposition(lparam) catch |err| {
+                    log.warn("ime composition failed err={}", .{err});
+                };
+            }
+            return 0;
+        },
+
+        win32.WM_IME_ENDCOMPOSITION => {
+            if (surface) |s| {
+                s.imeEndComposition() catch |err| {
+                    log.warn("ime end composition failed err={}", .{err});
+                };
+            }
+            return 0;
+        },
+
         win32.WM_APP => {
             // Wakeup: nothing to do; the message loop drains the
             // mailbox via core_app.tick.

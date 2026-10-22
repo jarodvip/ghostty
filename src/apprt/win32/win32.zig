@@ -330,6 +330,29 @@ pub const kernel32 = struct {
     pub extern "kernel32" fn GlobalSize(hMem: HGLOBAL) usize;
 };
 
+pub const WM_IME_STARTCOMPOSITION: UINT = 0x010D;
+pub const WM_IME_ENDCOMPOSITION: UINT = 0x010E;
+pub const WM_IME_COMPOSITION: UINT = 0x010F;
+pub const WM_IME_KEYLAST: UINT = 0x010F;
+
+/// ImmGetCompositionStringW indices.
+pub const GCS_COMPSTR: LONG = 0x0008;
+pub const GCS_RESULTSTR: LONG = 0x0800;
+
+// IME window class helper
+pub const HIMC = *anyopaque;
+
+pub const imm32 = struct {
+    pub extern "imm32" fn ImmGetContext(hwnd: HWND) ?HIMC;
+    pub extern "imm32" fn ImmReleaseContext(hwnd: HWND, himc: ?HIMC) BOOL;
+    pub extern "imm32" fn ImmGetCompositionStringW(
+        himc: ?HIMC,
+        dwIndex: LONG,
+        lpBuf: ?*anyopaque,
+        dwBufLen: DWORD,
+    ) LONG;
+};
+
 // GlobalAlloc flags
 pub const GMEM_MOVEABLE: UINT = 0x0002;
 pub const GMEM_ZEROINIT: UINT = 0x0040;

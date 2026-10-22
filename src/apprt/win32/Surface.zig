@@ -503,3 +503,60 @@ pub fn focusCallback(self: *Self, focused: bool) !void {
         try cs.focusCallback(focused);
     }
 }
+
+// ------------------------------------------------------------------
+// IME handling
+// ------------------------------------------------------------------
+
+/// Handle a WM_IME_COMPOSITION message. `lparam` indicates which
+/// composition strings are available: GCS_RESULTSTR means the IME has
+/// committed text, GCS_COMPSTR means the composition (preedit) string
+/// changed.
+pub fn imeComposition(self: *Self, lparam: win32.LPARAM) !void {
+    const himc = win32.imm32.ImmGetContext(self.hwnd) orelse return;
+    defer _ = win32.imm32.ImmReleaseContext(self.hwnd, himc);
+
+    // Committed text: send it to the terminal as-is.
+    if (lparam & win32.GCS_RESULTSTR != 0) {
+        if (try self.imeReadString(himc, win32.GCS_RESULTSTR)) |text| {
+            defer self.app.alloc.free(text);
+            try self.core().textCallback(text);
+        }
+    }
+
+    // Composition string (preedit): update the preedit state.
+    if (lparam & win32.GCS_COMPSTR != 0) {
+        if (try self.imeReadString(himc, win32.GCS_COMPSTR)) |text| {
+            defer self.app.alloc.free(text);
+            try self.core().preeditCallback(text);
+        }
+    }
+}
+
+/// Handle a WM_IME_ENDCOMPOSITION message: clear the preedit state.
+pub fn imeEndComposition(self: *Self) !void {
+    try self.core().preeditCallback(null);
+}
+
+/// Read a composition string from the IME context and return it as
+/// UTF-8. The caller owns the returned slice.
+fn imeReadString(self: *Self, himc: win32.HIMC, index: win32.LONG) !?[]u8 {
+    const alloc = self.app.alloc;
+
+    // Get the required buffer size in bytes (UTF-16).
+    const len = win32.imm32.ImmGetCompositionStringW(himc, index, null, 0);
+    if (len <= 0) return null;
+
+    const utf16 = try alloc.alloc(u16, @intCast(@divExact(@as(usize, @intCast(len)), 2)));
+    defer alloc.free(utf16);
+
+    const written = win32.imm32.ImmGetCompositionStringW(
+        himc,
+        index,
+        utf16.ptr,
+        @intCast(len),
+    );
+    if (written <= 0) return null;
+
+    return try std.unicode.utf16LeToUtf8Alloc(alloc, utf16);
+}
