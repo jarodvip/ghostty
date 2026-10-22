@@ -216,17 +216,32 @@ pub fn add(
     // POSIX C imports that are used throughout Ghostty on a general basis.
     // (note: errno is C stdlib but we just include it here because that's
     // where it's generally included otherwise)
-    try translate_c.addImportToModule(b, "posix_c", step.root_module, .{
-        .source = .{ .includes = .{ .files = &.{
-            .{ .path = "errno.h" },
-            .{ .path = "pwd.h" },
-            .{ .path = "signal.h" },
-            .{ .path = "sys/types.h" },
-            .{ .path = "unistd.h" },
-        } } },
-        .target = target,
-        .optimize = optimize,
-    });
+    // On Windows, pwd.h and unistd.h aren't available in the MinGW headers
+    // we use, so they are excluded; the code that needs them is already
+    // gated to non-Windows targets.
+    if (target.result.os.tag == .windows) {
+        try translate_c.addImportToModule(b, "posix_c", step.root_module, .{
+            .source = .{ .includes = .{ .files = &.{
+                .{ .path = "errno.h" },
+                .{ .path = "signal.h" },
+                .{ .path = "sys/types.h" },
+            } } },
+            .target = target,
+            .optimize = optimize,
+        });
+    } else {
+        try translate_c.addImportToModule(b, "posix_c", step.root_module, .{
+            .source = .{ .includes = .{ .files = &.{
+                .{ .path = "errno.h" },
+                .{ .path = "pwd.h" },
+                .{ .path = "signal.h" },
+                .{ .path = "sys/types.h" },
+                .{ .path = "unistd.h" },
+            } } },
+            .target = target,
+            .optimize = optimize,
+        });
+    }
 
     // Freetype. We always include this even if our font backend doesn't
     // use it because Dear Imgui uses Freetype.
@@ -690,6 +705,7 @@ pub fn add(
 
         switch (self.config.app_runtime) {
             .none => {},
+            .win32 => {},
             .gtk => try self.addGtk(step),
         }
     }

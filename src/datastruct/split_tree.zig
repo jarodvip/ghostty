@@ -1365,6 +1365,7 @@ pub fn SplitTree(comptime V: type) type {
                 },
             ),
 
+            .win32 => void,
             .none => void,
         };
     };

@@ -998,6 +998,7 @@ pub const Action = union(enum) {
             .{ .name = "GhosttyBindingAction" },
         ),
 
+        .win32 => void,
         .none => void,
     };
 

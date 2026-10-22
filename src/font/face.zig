@@ -64,6 +64,7 @@ pub const DesiredSize = struct {
             .{ .name = "GhosttyFontDesiredSize" },
         ),
 
+        .win32 => void,
         .none => void,
     };
 };
