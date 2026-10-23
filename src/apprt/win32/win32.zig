@@ -12,6 +12,7 @@ const windows = std.os.windows;
 pub const BOOL = windows.BOOL;
 pub const DWORD = windows.DWORD;
 pub const HDC = windows.HDC;
+pub const HANDLE = windows.HANDLE;
 pub const HINSTANCE = windows.HINSTANCE;
 pub const HWND = windows.HWND;
 pub const LONG = windows.LONG;
@@ -19,6 +20,7 @@ pub const LPARAM = windows.LPARAM;
 pub const LPCWSTR = windows.LPCWSTR;
 pub const LPWSTR = windows.LPWSTR;
 pub const UINT = windows.UINT;
+pub const ULONG_PTR = usize;
 pub const Win32Error = windows.Win32Error;
 
 /// WPARAM is not yet in the Zig stdlib; it is UINT_PTR (usize).
@@ -136,6 +138,12 @@ pub const WM_APP: UINT = 0x8000;
 /// read request is complete and should be delivered to the core
 /// surface on the main thread.
 pub const WM_APP_CLIPBOARD_READ: UINT = WM_APP + 1;
+
+/// Custom message posted by the IPC server thread when a new-window
+/// request arrives from the CLI. wParam is unused; lParam carries a
+/// pointer to an allocated, NUL-terminated UTF-8 arguments buffer that
+/// the app thread takes ownership of.
+pub const WM_APP_NEW_WINDOW: UINT = WM_APP + 2;
 
 // Virtual key codes (subset used for modifiers)
 pub const VK_SHIFT: i32 = 0x10;
@@ -328,6 +336,30 @@ pub const kernel32 = struct {
     pub extern "kernel32" fn GlobalLock(hMem: HGLOBAL) ?*anyopaque;
     pub extern "kernel32" fn GlobalUnlock(hMem: HGLOBAL) BOOL;
     pub extern "kernel32" fn GlobalSize(hMem: HGLOBAL) usize;
+    pub extern "kernel32" fn CreateFileW(
+        lpFileName: LPCWSTR,
+        dwDesiredAccess: DWORD,
+        dwShareMode: DWORD,
+        lpSecurityAttributes: ?*anyopaque,
+        dwCreationDisposition: DWORD,
+        dwFlagsAndAttributes: DWORD,
+        hTemplateFile: ?HANDLE,
+    ) ?HANDLE;
+    pub extern "kernel32" fn ReadFile(
+        hFile: HANDLE,
+        lpBuffer: *anyopaque,
+        nNumberOfBytesToRead: DWORD,
+        lpNumberOfBytesRead: ?*DWORD,
+        lpOverlapped: ?*OVERLAPPED,
+    ) BOOL;
+    pub extern "kernel32" fn WriteFile(
+        hFile: HANDLE,
+        lpBuffer: *const anyopaque,
+        nNumberOfBytesToWrite: DWORD,
+        lpNumberOfBytesWritten: ?*DWORD,
+        lpOverlapped: ?*OVERLAPPED,
+    ) BOOL;
+    pub extern "kernel32" fn CloseHandle(hObject: HANDLE) BOOL;
 };
 
 pub const WM_IME_STARTCOMPOSITION: UINT = 0x010D;
@@ -342,6 +374,20 @@ pub const GCS_RESULTSTR: LONG = 0x0800;
 // IME window class helper
 pub const HIMC = *anyopaque;
 
+/// OVERLAPPED structure for async I/O. Matches the Win32 definition.
+pub const OVERLAPPED = extern struct {
+    Internal: ULONG_PTR,
+    InternalHigh: ULONG_PTR,
+    DUMMYUNIONNAME: extern union {
+        DUMMYSTRUCTNAME: extern struct {
+            Offset: DWORD,
+            OffsetHigh: DWORD,
+        },
+        Pointer: ?*anyopaque,
+    },
+    hEvent: ?HANDLE,
+};
+
 pub const imm32 = struct {
     pub extern "imm32" fn ImmGetContext(hwnd: HWND) ?HIMC;
     pub extern "imm32" fn ImmReleaseContext(hwnd: HWND, himc: ?HIMC) BOOL;
@@ -351,6 +397,37 @@ pub const imm32 = struct {
         lpBuf: ?*anyopaque,
         dwBufLen: DWORD,
     ) LONG;
+};
+
+/// Named pipe constants.
+pub const PIPE_ACCESS_DUPLEX: DWORD = 0x00000003;
+pub const PIPE_TYPE_MESSAGE: DWORD = 0x00000004;
+pub const PIPE_READMODE_MESSAGE: DWORD = 0x00000002;
+pub const PIPE_WAIT: DWORD = 0x00000000;
+pub const NMPWAIT_USE_DEFAULT_WAIT: DWORD = 0x00000000;
+pub const GENERIC_READ: DWORD = 0x80000000;
+pub const GENERIC_WRITE: DWORD = 0x40000000;
+pub const GENERIC_READ_WRITE: DWORD = GENERIC_READ | GENERIC_WRITE;
+pub const OPEN_EXISTING: DWORD = 3;
+pub const ERROR_PIPE_CONNECTED: u32 = 535;
+pub const INVALID_HANDLE_VALUE: HANDLE = @ptrFromInt(@as(usize, @bitCast(@as(isize, -1))));
+pub const FALSE: BOOL = .FALSE;
+pub const TRUE: BOOL = .TRUE;
+
+pub const kernel32_pipe = struct {
+    pub extern "kernel32" fn CreateNamedPipeW(
+        lpName: LPCWSTR,
+        dwOpenMode: DWORD,
+        dwPipeMode: DWORD,
+        nMaxInstances: DWORD,
+        nOutBufferSize: DWORD,
+        nInBufferSize: DWORD,
+        nDefaultTimeOut: DWORD,
+        lpSecurityAttributes: ?*anyopaque,
+    ) HANDLE;
+    pub extern "kernel32" fn ConnectNamedPipe(hNamedPipe: HANDLE, lpOverlapped: ?*OVERLAPPED) BOOL;
+    pub extern "kernel32" fn DisconnectNamedPipe(hNamedPipe: HANDLE) BOOL;
+    pub extern "kernel32" fn FlushFileBuffers(hFile: HANDLE) BOOL;
 };
 
 // GlobalAlloc flags

@@ -27,6 +27,12 @@ const log = std.log.scoped(.win32);
 /// The name of our window class.
 const class_name: [8:0]u16 = .{ 'G', 'h', 'o', 's', 't', 't', 'y', 0 };
 
+/// Payload carried by the WM_APP_NEW_WINDOW message. The app thread
+/// takes ownership of both the struct and the data slice.
+const IpcNewWindowData = struct {
+    data: []u8,
+};
+
 /// The app-scoped application state.
 core_app: *CoreApp,
 alloc: Allocator,
@@ -43,6 +49,10 @@ surfaces: std.ArrayListUnmanaged(*Surface) = .empty,
 /// timer when the last window closes.
 windows_open: bool,
 
+/// Thread serving the single-instance IPC named pipe. Detached; lives
+/// for the duration of the process.
+ipc_thread: ?std.Thread = null,
+
 pub fn init(
     self: *App,
     core_app: *CoreApp,
@@ -56,6 +66,7 @@ pub fn init(
         .hinstance = undefined,
         .hwnd = undefined,
         .windows_open = false,
+        .ipc_thread = null,
     };
 
     // Load our configuration.
@@ -92,13 +103,23 @@ pub fn init(
     }
 
     // Create the main window and its surface.
-    try self.newSurface();
+    try self.newSurface(null);
+
+    // Start the single-instance IPC server so `ghostty +new-window`
+    // can request new windows from a running instance.
+    if (std.Thread.spawn(.{ .stack_size = 16 * 1024 * 1024 }, ipcServerThread, .{self})) |thr| {
+        thr.detach();
+        self.ipc_thread = thr;
+    } else |err| {
+        log.warn("failed to start IPC server thread err={}", .{err});
+    }
 }
 
 /// Create a new window and its associated apprt surface. The first
 /// window created by this function also becomes the app's primary
-/// window (`hwnd`), used for wakeups.
-fn newSurface(self: *App) !void {
+/// window (`hwnd`), used for wakeups. `working_directory` is an
+/// optional directory to use for the first surface.
+fn newSurface(self: *App, working_directory: ?[]const u8) !void {
     const hwnd = win32.user32.CreateWindowExW(
         0,
         &class_name,
@@ -120,7 +141,7 @@ fn newSurface(self: *App) !void {
     errdefer _ = win32.user32.DestroyWindow(hwnd);
 
     // Initialize the apprt surface and its core surface.
-    try surface.init(self, hwnd);
+    try surface.init(self, hwnd, working_directory);
     errdefer surface.deinit();
 
     // Store the surface pointer in the window's user data so the
@@ -200,13 +221,13 @@ pub fn performAction(
         },
 
         .new_window => {
-            try self.newSurface();
+            try self.newSurface(null);
             return true;
         },
 
         .new_tab => {
             // The Win32 apprt does not have tabs; open a new window.
-            try self.newSurface();
+            try self.newSurface(null);
             return true;
         },
 
@@ -318,9 +339,145 @@ pub fn performIpc(
     value: apprt.ipc.Action.Value(action),
 ) !bool {
     _ = alloc;
-    _ = target;
-    _ = value;
-    return false;
+    switch (action) {
+        .new_window => {
+            // Serialize the arguments as NUL-separated UTF-8 strings.
+            const args = value.arguments orelse return try ipcSend(&.{});
+            return try ipcSend(args);
+        },
+        else => {
+            _ = target;
+            return false;
+        },
+    }
+}
+
+/// Connect to the running Ghostty instance's named pipe and send the
+/// serialized arguments for the requested action.
+fn ipcSend(args: []const [:0]const u8) !bool {
+    const pipe_name: [17:0]u16 = .{ '\\', '\\', '.', '\\', 'p', 'i', 'p', 'e', '\\', 'g', 'h', 'o', 's', 't', 't', 'y', 0 };
+
+    const hPipe = win32.kernel32.CreateFileW(
+        &pipe_name,
+        win32.GENERIC_READ_WRITE,
+        0,
+        null,
+        win32.OPEN_EXISTING,
+        0,
+        null,
+    ) orelse {
+        log.info("no running Ghostty instance found for IPC", .{});
+        return error.IPCFailed;
+    };
+    defer _ = win32.kernel32.CloseHandle(hPipe);
+
+    // Compute the total payload size and build the buffer.
+    var total: usize = 0;
+    for (args) |arg| total += arg.len + 1;
+    if (total == 0) total = 1; // at least one NUL
+
+    const buf = try std.heap.page_allocator.alloc(u8, total);
+    defer std.heap.page_allocator.free(buf);
+
+    var off: usize = 0;
+    for (args) |arg| {
+        @memcpy(buf[off .. off + arg.len], arg);
+        off += arg.len;
+        buf[off] = 0;
+        off += 1;
+    }
+    if (args.len == 0) buf[0] = 0;
+
+    var written: win32.DWORD = 0;
+    if (win32.kernel32.WriteFile(
+        hPipe,
+        buf.ptr,
+        @intCast(buf.len),
+        &written,
+        null,
+    ) == win32.FALSE) {
+        return error.IPCFailed;
+    }
+
+    return true;
+}
+
+/// The IPC server thread. It waits for connections on the named pipe,
+/// reads the serialized arguments, and posts them to the app thread.
+fn ipcServerThread(app: *App) void {
+    const pipe_name: [17:0]u16 = .{ '\\', '\\', '.', '\\', 'p', 'i', 'p', 'e', '\\', 'g', 'h', 'o', 's', 't', 't', 'y', 0 };
+
+    while (true) {
+        const hPipe = win32.kernel32_pipe.CreateNamedPipeW(
+            &pipe_name,
+            win32.PIPE_ACCESS_DUPLEX,
+            win32.PIPE_TYPE_MESSAGE | win32.PIPE_READMODE_MESSAGE | win32.PIPE_WAIT,
+            1,
+            4096,
+            4096,
+            win32.NMPWAIT_USE_DEFAULT_WAIT,
+            null,
+        );
+        if (hPipe == win32.INVALID_HANDLE_VALUE) {
+            log.warn("failed to create IPC named pipe", .{});
+            return;
+        }
+
+        // Wait for a client to connect.
+        if (win32.kernel32_pipe.ConnectNamedPipe(hPipe, null) == win32.FALSE) {
+            const err = win32.getLastError();
+            if (@intFromEnum(err) != win32.ERROR_PIPE_CONNECTED) {
+                _ = win32.kernel32.CloseHandle(hPipe);
+                continue;
+            }
+        }
+
+        // Read the request.
+        var buf: [8192]u8 = undefined;
+        var read: win32.DWORD = 0;
+        const ok = win32.kernel32.ReadFile(
+            hPipe,
+            &buf,
+            buf.len,
+            &read,
+            null,
+        );
+
+        // Flush and disconnect so the client can finish.
+        _ = win32.kernel32_pipe.FlushFileBuffers(hPipe);
+        _ = win32.kernel32_pipe.DisconnectNamedPipe(hPipe);
+        _ = win32.kernel32.CloseHandle(hPipe);
+
+        if (ok == win32.FALSE or read == 0) continue;
+
+        // Allocate a message payload carrying the raw data and its
+        // length, then post it to the app thread. The app thread takes
+        // ownership of both allocations.
+        const msg = app.alloc.create(IpcNewWindowData) catch continue;
+        msg.data = app.alloc.dupe(u8, buf[0..read]) catch {
+            app.alloc.destroy(msg);
+            continue;
+        };
+        _ = win32.user32.PostMessageW(
+            app.hwnd,
+            win32.WM_APP_NEW_WINDOW,
+            0,
+            @intCast(@intFromPtr(msg)),
+        );
+    }
+}
+
+/// Parse the `--working-directory=<path>` argument out of a
+/// NUL-separated arguments buffer. Returns `null` if not present.
+fn parseWorkingDirectory(data: []const u8) ?[]const u8 {
+    const prefix = "--working-directory=";
+    var it = std.mem.splitScalar(u8, data, 0);
+    while (it.next()) |arg| {
+        if (std.mem.startsWith(u8, arg, prefix)) {
+            return arg[prefix.len..];
+        }
+    }
+    return null;
 }
 
 /// The window procedure for all Ghostty windows.
@@ -534,6 +691,24 @@ fn wndProc(
 
         win32.WM_APP_CLIPBOARD_READ => {
             if (surface) |s| s.completeClipboardPending();
+            return 0;
+        },
+
+        win32.WM_APP_NEW_WINDOW => {
+            if (surface) |s| {
+                // lParam carries a pointer to an allocated
+                // IpcNewWindowData payload. Take ownership here.
+                const payload: *IpcNewWindowData = @ptrFromInt(@as(usize, @intCast(lparam)));
+                defer {
+                    s.rtApp().alloc.free(payload.data);
+                    s.rtApp().alloc.destroy(payload);
+                }
+
+                const wd = parseWorkingDirectory(payload.data);
+                s.rtApp().newSurface(wd) catch |err| {
+                    log.warn("failed to create new window via IPC err={}", .{err});
+                };
+            }
             return 0;
         },
 

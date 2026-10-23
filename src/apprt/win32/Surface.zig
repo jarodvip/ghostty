@@ -63,7 +63,12 @@ const ClipboardPending = struct {
 };
 
 /// Initialize the apprt surface and the core surface.
-pub fn init(self: *Self, app: *App, hwnd: win32.HWND) !void {
+pub fn init(
+    self: *Self,
+    app: *App,
+    hwnd: win32.HWND,
+    working_directory: ?[]const u8,
+) !void {
     self.* = .{
         .app = app,
         .hwnd = hwnd,
@@ -88,6 +93,14 @@ pub fn init(self: *Self, app: *App, hwnd: win32.HWND) !void {
         .window,
     );
     defer config.deinit();
+
+    // Apply an optional working-directory override from IPC.
+    if (working_directory) |wd| {
+        const config_alloc = config.arenaAlloc();
+        var wd_val: configpkg.WorkingDirectory = .{ .path = try config_alloc.dupe(u8, wd) };
+        try wd_val.finalize(config_alloc);
+        config.@"working-directory" = wd_val;
+    }
 
     // Initialize the core surface. This calls back into this surface
     // via `rt_surface` for content scale, size, etc.
