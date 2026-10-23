@@ -20,6 +20,7 @@
 const Self = @This();
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const gl = @import("opengl");
 const egl = gl.egl;
@@ -228,12 +229,17 @@ pub fn readPixelsAlloc(self: *const Self, alloc: std.mem.Allocator) ![]u8 {
     const pixels = try alloc.alloc(u8, self.width * self.height * 4);
     errdefer alloc.free(pixels);
 
+    // On Windows, read back directly as BGRA so the GDI presentation
+    // path can blit without a per-pixel channel swap. Elsewhere RGBA is
+    // used as-is by the apprt.
+    const format: gl.Texture.Format = if (builtin.target.os.tag == .windows) .bgra else .rgba;
+
     try gl.readPixels(
         0,
         0,
         @intCast(self.width),
         @intCast(self.height),
-        .rgba,
+        format,
         .unsigned_byte,
         pixels.ptr,
     );

@@ -392,16 +392,10 @@ pub fn paint(self: *Self) void {
 fn blitMemory(hdc: win32.HDC, mem: renderer.OpenGL.ExportedFrame.Memory) void {
     defer mem.deinit();
 
-    // OpenGL readPixels returns tightly-packed RGBA8, but Windows GDI
-    // 32bpp DIBs (BI_RGB) expect BGRA byte order. Swap R and B so colors
-    // are correct. This is done in place; the buffer is freed after blit.
+    // On Windows the renderer reads back pixels directly as BGRA (see
+    // Target.readPixelsAlloc), matching the byte order expected by GDI
+    // 32bpp DIBs, so no channel swap is needed here.
     const pixels = mem.pixels;
-    var i: usize = 0;
-    while (i + 4 <= pixels.len) : (i += 4) {
-        const r = pixels[i];
-        pixels[i] = pixels[i + 2];
-        pixels[i + 2] = r;
-    }
 
     // Build a BITMAPINFO describing the RGBA8 pixel buffer. Windows GDI
     // uses bottom-up DIBs with a positive height; our pixel data from
