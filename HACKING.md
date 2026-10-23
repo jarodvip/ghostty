@@ -89,9 +89,18 @@ To build with the MSVC ABI (requires the Windows SDK):
 zig build -Dtarget=x86_64-windows-msvc -Dapp-runtime=win32
 ```
 
+The MSVC ABI build needs the Windows SDK. Install Visual Studio Build
+Tools with the "Desktop development with C++" workload, for example:
+
+```powershell
+winget install Microsoft.VisualStudio.2022.BuildTools `
+  --override "--add Microsoft.VisualStudio.Workload.VCTools --passive --norestart"
+```
+
 The resulting executable is `zig-out/bin/ghostty.exe`. Note that
-`ghostty +new-window` and similar single-instance IPC commands are not
-yet supported on Windows.
+`ghostty +new-window` requires a running Ghostty instance (it works via
+a named pipe), and `ghostty +new-window`/`+new-tab` single-instance IPC
+commands are supported on Windows.
 
 ## AI and Agents
 
