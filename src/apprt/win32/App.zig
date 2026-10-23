@@ -86,7 +86,7 @@ pub fn init(
     const atom = win32.user32.RegisterClassW(&wc);
     if (atom == 0) {
         const err = win32.getLastError();
-        if (@intFromEnum(err) != win32.ERROR_CLASS_ALREADY_EXISTS) {
+        if (@backingInt(err) != win32.ERROR_CLASS_ALREADY_EXISTS) {
             return error.RegisterClassFailed;
         }
     }
@@ -147,7 +147,7 @@ pub fn run(self: *App) !void {
     while (true) {
         const res = win32.user32.GetMessageW(&msg, null, 0, 0);
         // FALSE (0) means WM_QUIT was received; -1 means error.
-        const res_int = @intFromEnum(res);
+        const res_int = @backingInt(res);
         if (res_int == 0) break;
         if (res_int == -1) return error.GetMessageFailed;
 
@@ -221,7 +221,7 @@ pub fn performAction(
             switch (value) {
                 .this => switch (target) {
                     .surface => |s| {
-                        const rt_surface: *Surface = @alignCast(@ptrCast(s.rt_surface));
+                        const rt_surface: *Surface = @ptrCast(@alignCast(s.rt_surface));
                         _ = win32.user32.PostMessageW(rt_surface.hwnd, win32.WM_CLOSE, 0, 0);
                     },
                     .app => {},
@@ -236,7 +236,7 @@ pub fn performAction(
                 .app => {
                     // Close the focused window, or all if none focused.
                     if (self.core_app.focusedSurface()) |fs| {
-                        const rt_surface: *Surface = @alignCast(@ptrCast(fs.rt_surface));
+                        const rt_surface: *Surface = @ptrCast(@alignCast(fs.rt_surface));
                         _ = win32.user32.PostMessageW(rt_surface.hwnd, win32.WM_CLOSE, 0, 0);
                     } else {
                         for (self.surfaces.items) |s| {
@@ -245,7 +245,7 @@ pub fn performAction(
                     }
                 },
                 .surface => |s| {
-                    const rt_surface: *Surface = @alignCast(@ptrCast(s.rt_surface));
+                    const rt_surface: *Surface = @ptrCast(@alignCast(s.rt_surface));
                     _ = win32.user32.PostMessageW(rt_surface.hwnd, win32.WM_CLOSE, 0, 0);
                 },
             }
@@ -255,7 +255,7 @@ pub fn performAction(
         .render => {
             switch (target) {
                 .surface => |s| {
-                    const rt_surface: *Surface = @alignCast(@ptrCast(s.rt_surface));
+                    const rt_surface: *Surface = @ptrCast(@alignCast(s.rt_surface));
                     _ = win32.user32.InvalidateRect(rt_surface.hwnd, null, .FALSE);
                 },
                 .app => {},
@@ -266,7 +266,7 @@ pub fn performAction(
         .set_title => {
             switch (target) {
                 .surface => |s| {
-                    const rt_surface: *Surface = @alignCast(@ptrCast(s.rt_surface));
+                    const rt_surface: *Surface = @ptrCast(@alignCast(s.rt_surface));
                     try rt_surface.setTitle(value.title);
                 },
                 .app => {},
@@ -294,7 +294,7 @@ pub fn performAction(
         .present_terminal => {
             switch (target) {
                 .surface => |s| {
-                    const rt_surface: *Surface = @alignCast(@ptrCast(s.rt_surface));
+                    const rt_surface: *Surface = @ptrCast(@alignCast(s.rt_surface));
                     _ = win32.user32.SetFocus(rt_surface.hwnd);
                 },
                 .app => {},

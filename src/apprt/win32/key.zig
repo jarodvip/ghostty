@@ -75,15 +75,14 @@ pub fn keyEvent(
     // to the virtual key code for a few common cases.
     const key_final: input.Key = if (key != .unidentified)
         key
-    else
-        switch (vk) {
-            win32.VK_SHIFT => fromScanCode(if (isKeyDown(win32.VK_LSHIFT)) 0x2A else 0x36),
-            win32.VK_CONTROL => fromScanCode(if (isKeyDown(win32.VK_LCONTROL)) 0x1D else 0x1D),
-            win32.VK_MENU => fromScanCode(0x38),
-            win32.VK_LWIN => fromScanCode(0x5B),
-            win32.VK_RWIN => fromScanCode(0x5C),
-            else => .unidentified,
-        };
+    else switch (vk) {
+        win32.VK_SHIFT => fromScanCode(if (isKeyDown(win32.VK_LSHIFT)) 0x2A else 0x36),
+        win32.VK_CONTROL => fromScanCode(if (isKeyDown(win32.VK_LCONTROL)) 0x1D else 0x1D),
+        win32.VK_MENU => fromScanCode(0x38),
+        win32.VK_LWIN => fromScanCode(0x5B),
+        win32.VK_RWIN => fromScanCode(0x5C),
+        else => .unidentified,
+    };
 
     // Compute the unshifted codepoint using ToUnicode with an empty
     // keyboard state (no modifiers). This lets Ghostty's unicode-based
