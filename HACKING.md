@@ -67,6 +67,32 @@ sudo xcode-select --switch /Applications/Xcode.app
 > You do not need to be running on macOS 26 to build Ghostty, you can
 > still use Xcode 26 on macOS 15 stable.
 
+### Windows
+
+Building the Windows Ghostty app requires Zig (see
+[build.zig.zon](build.zig.zon) for the minimum version) and the Windows
+SDK for the MSVC ABI. The recommended way to get the MSVC toolchain is
+to install Visual Studio Build Tools with the "Desktop development
+with C++" workload, which includes the Windows SDK.
+
+The Windows app uses a native Win32 apprt and WGL for rendering. The
+easiest way to build it is with the MinGW ABI, which does not require
+the Windows SDK:
+
+```shell
+zig build -Dtarget=x86_64-windows-gnu -Dapp-runtime=win32
+```
+
+To build with the MSVC ABI (requires the Windows SDK):
+
+```shell
+zig build -Dtarget=x86_64-windows-msvc -Dapp-runtime=win32
+```
+
+The resulting executable is `zig-out/bin/ghostty.exe`. Note that
+`ghostty +new-window` and similar single-instance IPC commands are not
+yet supported on Windows.
+
 ## AI and Agents
 
 If you're using AI assistance with Ghostty, Ghostty provides an
