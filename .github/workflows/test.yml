@@ -997,7 +997,8 @@ jobs:
         run: zig build -Dtarget=x86_64-windows-gnu -Dapp-runtime=win32
 
       - name: Verify version
-        run: zig-out/bin/ghostty.exe +version
+        shell: pwsh
+        run: ./zig-out/bin/ghostty.exe +version
 
   build-linux:
     strategy:

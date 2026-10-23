@@ -187,7 +187,8 @@ exhaustive switches (`hasFreetype`, `hasHarfbuzz`, etc.). The existing
 
 ## Verification
 
-- Build: `zig build -Dtarget=x86_64-windows-gnu -Dapp-runtime=win32 -Dfont-backend=directwrite`
+- Build (once the `-Dfont-backend=directwrite` option is implemented):
+  `zig build -Dtarget=x86_64-windows-gnu -Dapp-runtime=win32 -Dfont-backend=directwrite`
 - Run the app; verify text renders correctly with ClearType.
 - Test: CJK fallback, emoji (color font), variable font axes
   (`font-variation-settings`), synthetic bold/italic.

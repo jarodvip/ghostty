@@ -365,6 +365,8 @@ pub const kernel32 = struct {
 pub const WM_IME_STARTCOMPOSITION: UINT = 0x010D;
 pub const WM_IME_ENDCOMPOSITION: UINT = 0x010E;
 pub const WM_IME_COMPOSITION: UINT = 0x010F;
+// Per the Windows SDK, WM_IME_KEYLAST has the same value as
+// WM_IME_COMPOSITION.
 pub const WM_IME_KEYLAST: UINT = 0x010F;
 
 /// ImmGetCompositionStringW indices.

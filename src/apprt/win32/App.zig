@@ -40,7 +40,8 @@ config: Config,
 hinstance: win32.HINSTANCE,
 
 /// The primary window handle, used for wakeups and the message loop.
-hwnd: win32.HWND,
+/// Null when no windows are open.
+hwnd: ?win32.HWND = null,
 
 /// All open surfaces (one per window).
 surfaces: std.ArrayListUnmanaged(*Surface) = .empty,
@@ -64,7 +65,7 @@ pub fn init(
         .alloc = core_app.alloc,
         .config = undefined,
         .hinstance = undefined,
-        .hwnd = undefined,
+        .hwnd = null,
         .windows_open = false,
         .ipc_thread = null,
     };
@@ -189,7 +190,7 @@ pub fn terminate(self: *App) void {
     const hwnds = self.alloc.alloc(win32.HWND, n) catch {
         // If allocation fails, fall back to destroying the primary
         // window only; the rest is best-effort.
-        _ = win32.user32.DestroyWindow(self.hwnd);
+        if (self.hwnd) |h| _ = win32.user32.DestroyWindow(h);
         self.surfaces.deinit(self.alloc);
         self.windows_open = false;
         self.config.deinit();
@@ -209,7 +210,8 @@ pub fn terminate(self: *App) void {
 /// Wake up the event loop. Called by the core app when the mailbox
 /// needs draining.
 pub fn wakeup(self: *App) void {
-    _ = win32.user32.PostMessageW(self.hwnd, win32.WM_APP, 0, 0);
+    // If no windows are open there's nothing to wake.
+    if (self.hwnd) |h| _ = win32.user32.PostMessageW(h, win32.WM_APP, 0, 0);
 }
 
 pub fn performAction(
@@ -445,7 +447,7 @@ fn ipcServerThread(app: *App) void {
         // Wait for a client to connect.
         if (win32.kernel32_pipe.ConnectNamedPipe(hPipe, null) == win32.FALSE) {
             const err = win32.getLastError();
-            if (@intFromEnum(err) != win32.ERROR_PIPE_CONNECTED) {
+            if (@backingInt(err) != win32.ERROR_PIPE_CONNECTED) {
                 _ = win32.kernel32.CloseHandle(hPipe);
                 continue;
             }
@@ -477,8 +479,15 @@ fn ipcServerThread(app: *App) void {
             app.alloc.destroy(msg);
             continue;
         };
+        // If no window is open (shouldn't normally happen), drop the
+        // request; the payload is freed below via errdefer-like logic.
+        const h = app.hwnd orelse {
+            app.alloc.free(msg.data);
+            app.alloc.destroy(msg);
+            continue;
+        };
         _ = win32.user32.PostMessageW(
-            app.hwnd,
+            h,
             win32.WM_APP_NEW_WINDOW,
             0,
             @intCast(@intFromPtr(msg)),

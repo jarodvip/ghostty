@@ -70,10 +70,11 @@ sudo xcode-select --switch /Applications/Xcode.app
 ### Windows
 
 Building the Windows Ghostty app requires Zig (see
-[build.zig.zon](build.zig.zon) for the minimum version) and the Windows
-SDK for the MSVC ABI. The recommended way to get the MSVC toolchain is
-to install Visual Studio Build Tools with the "Desktop development
-with C++" workload, which includes the Windows SDK.
+[build.zig.zon](build.zig.zon) for the minimum version). Building with
+the MSVC ABI also requires the Windows SDK; the MinGW ABI does not.
+The recommended way to get the MSVC toolchain is to install Visual
+Studio Build Tools with the "Desktop development with C++" workload,
+which includes the Windows SDK.
 
 The Windows app uses a native Win32 apprt and WGL for rendering. The
 easiest way to build it is with the MinGW ABI, which does not require

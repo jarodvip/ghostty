@@ -31,8 +31,12 @@ pub fn read(alloc: Allocator) !?[]u8 {
 
     const size = win32.kernel32.GlobalSize(h);
     const bytes: []const u8 = @as([*]const u8, @ptrCast(ptr))[0..size];
-    // GlobalAlloc memory is suitably aligned for u16.
-    const utf16: []const u16 = @alignCast(std.mem.bytesAsSlice(u16, bytes));
+    // GlobalAlloc memory is suitably aligned for u16. The clipboard text
+    // is NUL-terminated; GlobalSize may include the terminator (and
+    // possibly padding), so truncate at the first NUL before converting.
+    const utf16_all: []const u16 = @alignCast(std.mem.bytesAsSlice(u16, bytes));
+    const utf16_len = std.mem.indexOfScalar(u16, utf16_all, 0) orelse utf16_all.len;
+    const utf16 = utf16_all[0..utf16_len];
     const utf8 = try std.unicode.utf16LeToUtf8Alloc(alloc, utf16);
     if (utf8.len == 0) {
         alloc.free(utf8);

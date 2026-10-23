@@ -216,9 +216,9 @@ pub fn add(
     // POSIX C imports that are used throughout Ghostty on a general basis.
     // (note: errno is C stdlib but we just include it here because that's
     // where it's generally included otherwise)
-    // On Windows, pwd.h and unistd.h aren't available in the MinGW headers
-    // we use, so they are excluded; the code that needs them is already
-    // gated to non-Windows targets.
+    // On Windows, pwd.h and unistd.h aren't required by the code that
+    // uses this module, so they are excluded; the code that needs them
+    // is already gated to non-Windows targets.
     if (target.result.os.tag == .windows) {
         try translate_c.addImportToModule(b, "posix_c", step.root_module, .{
             .source = .{ .includes = .{ .files = &.{

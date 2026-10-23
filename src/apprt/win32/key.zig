@@ -123,15 +123,6 @@ fn unshiftedCodepoint(vk: i32, scan_code: u32) u21 {
     return cp;
 }
 
-/// Convert a UTF-16 code unit from WM_CHAR into UTF-8. This handles
-/// only single code units; surrogate pairs arrive as two WM_CHAR
-/// messages and are combined by the caller if needed.
-pub fn utf16ToUtf8(alloc: std.mem.Allocator, code_unit: u16) ![]u8 {
-    var buf: [4]u8 = undefined;
-    const len = std.unicode.utf16LeToUtf8(&buf, &.{code_unit}) catch return "";
-    return try alloc.dupe(u8, buf[0..len]);
-}
-
 test "scan code mapping" {
     // US keyboard scan codes from keycodes.zig.
     try std.testing.expectEqual(input.Key.key_a, fromScanCode(0x1E));

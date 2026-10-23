@@ -181,6 +181,15 @@ pub fn destroySurface(self: *Self) void {
         _ = self.app.surfaces.swapRemove(idx);
     }
 
+    // If we just destroyed the app's primary window, repoint it at any
+    // remaining window so wakeups and IPC keep working.
+    if (self.app.hwnd == self.hwnd) {
+        self.app.hwnd = if (self.app.surfaces.items.len > 0)
+            self.app.surfaces.items[0].hwnd
+        else
+            null;
+    }
+
     self.app.windows_open = self.app.surfaces.items.len > 0;
 
     // Deinit the apprt surface (frees the core surface and title) and
@@ -638,5 +647,9 @@ fn imeReadString(self: *Self, himc: win32.HIMC, index: win32.LONG) !?[]u8 {
     );
     if (written <= 0) return null;
 
-    return try std.unicode.utf16LeToUtf8Alloc(alloc, utf16);
+    // `written` is the number of bytes actually copied. Truncate the
+    // slice to the written length so trailing zeroes in the allocation
+    // don't become part of the preedit/committed text.
+    const used = utf16[0..@intCast(@divExact(@as(usize, @intCast(written)), 2))];
+    return try std.unicode.utf16LeToUtf8Alloc(alloc, used);
 }
