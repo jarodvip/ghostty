@@ -1,9 +1,12 @@
 # Windows DirectWrite Font Backend — Design
 
-## Status: Proposal
+## Status: Partial Skeleton
 
-This document is a design proposal for adding a DirectWrite font backend
-to the Win32 apprt. It is not implemented yet; the current Windows build
+This document is a design proposal for adding a DirectWrite font
+backend to the Win32 apprt. A **compilable skeleton** exists at
+`src/font/face/directwrite.zig` (Face interface stubs returning
+`error.NotImplemented`); it is **not yet wired into the build**
+(`Backend.directwrite` does not exist yet). The current Windows build
 uses the `freetype_windows` backend (FreeType rendering + HarfBuzz
 shaping + a Windows font-directory scanner), which is functional.
 
