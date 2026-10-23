@@ -103,6 +103,20 @@ The resulting executable is `zig-out/bin/ghostty.exe`. Note that
 a named pipe), and `ghostty +new-window`/`+new-tab` single-instance IPC
 commands are supported on Windows.
 
+#### Verifying the MSVC ABI build
+
+Once the Windows SDK is installed, verify the MSVC ABI build end to end:
+
+```powershell
+zig build -Dtarget=x86_64-windows-msvc -Dapp-runtime=win32
+zig-out/bin/ghostty.exe +version
+zig build test -Dtarget=x86_64-windows-msvc
+```
+
+The build should succeed (the only failure mode is a missing SDK), and
+the unit tests should pass under the MSVC ABI. If the build reports
+`WindowsSdkNotFound`, install the VCTools workload as shown above.
+
 ## AI and Agents
 
 If you're using AI assistance with Ghostty, Ghostty provides an
