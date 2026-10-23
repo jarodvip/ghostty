@@ -131,3 +131,14 @@ pub fn utf16ToUtf8(alloc: std.mem.Allocator, code_unit: u16) ![]u8 {
     const len = std.unicode.utf16LeToUtf8(&buf, &.{code_unit}) catch return "";
     return try alloc.dupe(u8, buf[0..len]);
 }
+
+test "scan code mapping" {
+    // US keyboard scan codes from keycodes.zig.
+    try std.testing.expectEqual(input.Key.key_a, fromScanCode(0x1E));
+    try std.testing.expectEqual(input.Key.enter, fromScanCode(0x1C));
+    try std.testing.expectEqual(input.Key.space, fromScanCode(0x39));
+    try std.testing.expectEqual(input.Key.escape, fromScanCode(0x01));
+    try std.testing.expectEqual(input.Key.f1, fromScanCode(0x3B));
+    // Unknown scan code maps to unidentified.
+    try std.testing.expectEqual(input.Key.unidentified, fromScanCode(0xFFFF));
+}

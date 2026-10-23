@@ -485,6 +485,19 @@ fn parseWorkingDirectory(data: []const u8) ?[]const u8 {
     return null;
 }
 
+test "parseWorkingDirectory" {
+    try std.testing.expectEqualStrings(
+        "C:\\Users\\test",
+        parseWorkingDirectory("--working-directory=C:\\Users\\test\x00--command=cmd.exe").?,
+    );
+    try std.testing.expectEqualStrings(
+        "D:\\Dev",
+        parseWorkingDirectory("--command=cmd.exe\x00--working-directory=D:\\Dev").?,
+    );
+    try std.testing.expect(parseWorkingDirectory("--command=cmd.exe\x00") == null);
+    try std.testing.expect(parseWorkingDirectory("") == null);
+}
+
 /// The window procedure for all Ghostty windows.
 fn wndProc(
     hwnd: win32.HWND,
