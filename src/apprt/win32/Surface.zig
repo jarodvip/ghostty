@@ -262,8 +262,34 @@ pub fn clipboardRequest(
     const alloc = self.app.alloc;
 
     switch (state) {
-        // The Win32 apprt doesn't support the Kitty clipboard protocol yet.
-        .kitty_read, .kitty_write => return .unsupported,
+        // A Kitty read needs the clipboard text, delivered via the
+        // async completion path.
+        .kitty_read => {
+            const data = try clipboard.read(alloc) orelse return .unavailable;
+
+            if (self.clipboard_pending) |p| alloc.free(p.data);
+            self.clipboard_pending = .{
+                .req = state,
+                .data = data,
+                .has_text = true,
+            };
+            _ = win32.user32.PostMessageW(self.hwnd, win32.WM_APP_CLIPBOARD_READ, 0, 0);
+            return .started;
+        },
+
+        // A Kitty write carries its own committed contents; the core
+        // calls setClipboard when the request is completed. We just
+        // need to start the completion path.
+        .kitty_write => {
+            if (self.clipboard_pending) |p| alloc.free(p.data);
+            self.clipboard_pending = .{
+                .req = state,
+                .data = &.{},
+                .has_text = false,
+            };
+            _ = win32.user32.PostMessageW(self.hwnd, win32.WM_APP_CLIPBOARD_READ, 0, 0);
+            return .started;
+        },
 
         // A MIME listing request: report what we can serve.
         .list => {
@@ -316,6 +342,14 @@ pub fn completeClipboardPending(self: *Self) void {
             .{ .available = if (pending.has_text) &.{"text/plain"} else &.{} },
         ) catch |err| {
             log.warn("failed to complete clipboard list err={}", .{err});
+        },
+        // A Kitty write carries its own committed contents; the core
+        // calls setClipboard itself when the request is completed.
+        .kitty_write => self.core().completeClipboardRequest(
+            pending.req,
+            .{},
+        ) catch |err| {
+            log.warn("failed to complete kitty clipboard write err={}", .{err});
         },
         else => self.core().completeClipboardRequest(
             pending.req,
