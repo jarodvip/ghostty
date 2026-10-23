@@ -340,8 +340,13 @@ pub fn performIpc(
 ) !bool {
     _ = alloc;
     switch (action) {
+        // The Win32 apprt has no tabs; both new_window and new_tab open
+        // a new window in the running instance.
         .new_window => {
-            // Serialize the arguments as NUL-separated UTF-8 strings.
+            const args = value.arguments orelse return try ipcSend(&.{});
+            return try ipcSend(args);
+        },
+        .new_tab => {
             const args = value.arguments orelse return try ipcSend(&.{});
             return try ipcSend(args);
         },
