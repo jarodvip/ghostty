@@ -181,11 +181,25 @@ pub fn run(self: *App) !void {
 }
 
 pub fn terminate(self: *App) void {
-    // Destroy any remaining windows. Each WM_DESTROY removes and
-    // deinitializes its surface via destroySurface, so after this loop
-    // the surfaces list is empty.
-    for (self.surfaces.items) |s| {
-        _ = win32.user32.DestroyWindow(s.hwnd);
+    // Destroy any remaining windows. We must snapshot the handles first:
+    // DestroyWindow synchronously delivers WM_DESTROY, whose handler
+    // removes and deinitializes the surface (mutating `self.surfaces`).
+    // Iterating while destroying would touch freed memory.
+    const n = self.surfaces.items.len;
+    const hwnds = self.alloc.alloc(win32.HWND, n) catch {
+        // If allocation fails, fall back to destroying the primary
+        // window only; the rest is best-effort.
+        _ = win32.user32.DestroyWindow(self.hwnd);
+        self.surfaces.deinit(self.alloc);
+        self.windows_open = false;
+        self.config.deinit();
+        return;
+    };
+    defer self.alloc.free(hwnds);
+    for (self.surfaces.items, 0..) |s, i| hwnds[i] = s.hwnd;
+
+    for (hwnds) |h| {
+        _ = win32.user32.DestroyWindow(h);
     }
     self.surfaces.deinit(self.alloc);
     self.windows_open = false;
