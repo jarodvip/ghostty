@@ -60,6 +60,10 @@ clipboard_pending: ?ClipboardPending = null,
 const ClipboardPending = struct {
     req: apprt.ClipboardRequest,
     data: []u8,
+
+    /// Whether the clipboard had text when the request was made. Used
+    /// by `.list` requests to report available MIME types.
+    has_text: bool = false,
 };
 
 /// Initialize the apprt surface and the core surface.
@@ -255,19 +259,46 @@ pub fn clipboardRequest(
     state: apprt.ClipboardRequest,
 ) !apprt.ClipboardReadResult {
     _ = clipboard_type;
-    // The Win32 apprt doesn't support the Kitty clipboard protocol yet.
-    if (state == .kitty_read or state == .kitty_write or state == .list) return .unsupported;
-
     const alloc = self.app.alloc;
-    const data = try clipboard.read(alloc) orelse return .unavailable;
 
-    // Cancel any previous pending read (shouldn't normally happen).
-    if (self.clipboard_pending) |p| alloc.free(p.data);
-    self.clipboard_pending = .{ .req = state, .data = data };
+    switch (state) {
+        // The Win32 apprt doesn't support the Kitty clipboard protocol yet.
+        .kitty_read, .kitty_write => return .unsupported,
 
-    // Wake up the message loop so the pending read is delivered.
-    _ = win32.user32.PostMessageW(self.hwnd, win32.WM_APP_CLIPBOARD_READ, 0, 0);
-    return .started;
+        // A MIME listing request: report what we can serve.
+        .list => {
+            // Cancel any previous pending read.
+            if (self.clipboard_pending) |p| alloc.free(p.data);
+            self.clipboard_pending = .{
+                .req = state,
+                .data = &.{},
+                .has_text = clipboard.hasText(),
+            };
+            _ = win32.user32.PostMessageW(self.hwnd, win32.WM_APP_CLIPBOARD_READ, 0, 0);
+            return .started;
+        },
+
+        // Direct paste and OSC 52 read both need the clipboard text.
+        .paste, .osc_52_read => {
+            const data = try clipboard.read(alloc) orelse return .unavailable;
+
+            // Cancel any previous pending read (shouldn't normally happen).
+            if (self.clipboard_pending) |p| alloc.free(p.data);
+            self.clipboard_pending = .{
+                .req = state,
+                .data = data,
+                .has_text = true,
+            };
+
+            // Wake up the message loop so the pending read is delivered.
+            _ = win32.user32.PostMessageW(self.hwnd, win32.WM_APP_CLIPBOARD_READ, 0, 0);
+            return .started;
+        },
+
+        // OSC 52 writes don't travel through clipboardRequest; they go
+        // straight to the apprt setClipboard API.
+        .osc_52_write => unreachable,
+    }
 }
 
 /// Complete a clipboard read that was posted to the message loop. This
@@ -275,16 +306,24 @@ pub fn clipboardRequest(
 pub fn completeClipboardPending(self: *Self) void {
     const pending = self.clipboard_pending orelse return;
     defer {
-        self.app.alloc.free(pending.data);
+        if (pending.data.len > 0) self.app.alloc.free(pending.data);
         self.clipboard_pending = null;
     }
 
-    self.core().completeClipboardRequest(
-        pending.req,
-        .{ .contents = &.{.{ .mime = "text/plain", .data = pending.data }} },
-    ) catch |err| {
-        log.warn("failed to complete clipboard request err={}", .{err});
-    };
+    switch (pending.req) {
+        .list => self.core().completeClipboardRequest(
+            pending.req,
+            .{ .available = if (pending.has_text) &.{"text/plain"} else &.{} },
+        ) catch |err| {
+            log.warn("failed to complete clipboard list err={}", .{err});
+        },
+        else => self.core().completeClipboardRequest(
+            pending.req,
+            .{ .contents = &.{.{ .mime = "text/plain", .data = pending.data }} },
+        ) catch |err| {
+            log.warn("failed to complete clipboard request err={}", .{err});
+        },
+    }
 }
 
 /// Write clipboard contents.

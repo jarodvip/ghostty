@@ -41,6 +41,13 @@ pub fn read(alloc: Allocator) !?[]u8 {
     return utf8;
 }
 
+/// Returns true if the standard clipboard currently has text.
+pub fn hasText() bool {
+    if (win32.user32_clipboard.OpenClipboard(null) == .FALSE) return false;
+    defer _ = win32.user32_clipboard.CloseClipboard();
+    return win32.user32_clipboard.IsClipboardFormatAvailable(win32.CF_UNICODETEXT) != .FALSE;
+}
+
 /// Write text to the standard clipboard.
 pub fn write(alloc: Allocator, text: []const u8) !void {
     // Convert the UTF-8 text to UTF-16 (with a NUL terminator).
