@@ -412,6 +412,9 @@ pub const GENERIC_WRITE: DWORD = 0x40000000;
 pub const GENERIC_READ_WRITE: DWORD = GENERIC_READ | GENERIC_WRITE;
 pub const OPEN_EXISTING: DWORD = 3;
 pub const ERROR_PIPE_CONNECTED: u32 = 535;
+
+/// ERROR_MORE_DATA — the pipe message is longer than the read buffer.
+pub const ERROR_MORE_DATA: u32 = 234;
 pub const INVALID_HANDLE_VALUE: HANDLE = @ptrFromInt(@as(usize, @bitCast(@as(isize, -1))));
 pub const FALSE: BOOL = .FALSE;
 pub const TRUE: BOOL = .TRUE;

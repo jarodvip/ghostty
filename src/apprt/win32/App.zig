@@ -455,29 +455,43 @@ fn ipcServerThread(app: *App) void {
             }
         }
 
-        // Read the request.
-        var buf: [8192]u8 = undefined;
-        var read: win32.DWORD = 0;
-        const ok = win32.kernel32.ReadFile(
-            hPipe,
-            &buf,
-            buf.len,
-            &read,
-            null,
-        );
+        // Read the request. The pipe is message-mode, so a read that fills
+        // the buffer returns ERROR_MORE_DATA when the message continues;
+        // loop until the whole message has been consumed instead of
+        // truncating long argument lists at the buffer size.
+        var buf: std.ArrayList(u8) = .empty;
+        defer buf.deinit(app.alloc);
+        var temp: [4096]u8 = undefined;
+        while (true) {
+            var read: win32.DWORD = 0;
+            const ok = win32.kernel32.ReadFile(
+                hPipe,
+                &temp,
+                temp.len,
+                &read,
+                null,
+            );
+            if (ok == win32.FALSE) {
+                const err = win32.getLastError();
+                if (@backingInt(err) != win32.ERROR_MORE_DATA) break; // error
+            }
+            buf.appendSlice(app.alloc, temp[0..read]) catch break;
+            // A short read means the message is complete.
+            if (read < temp.len) break;
+        }
 
         // Flush and disconnect so the client can finish.
         _ = win32.kernel32_pipe.FlushFileBuffers(hPipe);
         _ = win32.kernel32_pipe.DisconnectNamedPipe(hPipe);
         _ = win32.kernel32.CloseHandle(hPipe);
 
-        if (ok == win32.FALSE or read == 0) continue;
+        if (buf.items.len == 0) continue;
 
         // Allocate a message payload carrying the raw data and its
         // length, then post it to the app thread. The app thread takes
         // ownership of both allocations.
         const msg = app.alloc.create(IpcNewWindowData) catch continue;
-        msg.data = app.alloc.dupe(u8, buf[0..read]) catch {
+        msg.data = app.alloc.dupe(u8, buf.items) catch {
             app.alloc.destroy(msg);
             continue;
         };
