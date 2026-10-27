@@ -382,7 +382,10 @@ const entries: []const ModeEntry = &.{
     // See https://vt100.net/dec/ek-vt3xx-tp-002.pdf page 170
     // If `false` (the default), `backspace` emits 0x7f
     // If `true`, `backspace` emits 0x08
-    .{ .name = "backarrow_key_mode", .value = 67 },
+    // On Windows, shells (cmd/powershell) expect backspace to emit 0x08
+    // (BS), unlike Unix shells which expect 0x7f (DEL), so default the
+    // mode to emit BS on Windows.
+    .{ .name = "backarrow_key_mode", .value = 67, .default = builtin.target.os.tag == .windows },
     .{ .name = "enable_left_and_right_margin", .value = 69, .default_configurable = false },
     .{ .name = "mouse_event_normal", .value = 1000, .default_configurable = false },
     .{ .name = "mouse_event_button", .value = 1002, .default_configurable = false },

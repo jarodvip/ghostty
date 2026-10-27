@@ -66,9 +66,14 @@ pub fn keyEvent(
     utf8: []const u8,
     unshifted_codepoint: u21,
 ) input.KeyEvent {
-    // The scan code is in bits 16..23 of lParam.
+    // The scan code is in bits 16..23 of lParam, with the extended-key flag
+// in bit 24. Extended keys (arrows, Home/End/Delete, NumpadEnter, ...)
+// are stored in keycodes.zig with an 0xE0 high byte (e.g. 0xe047 for
+// Home), so combine the flag into a 16-bit scan code.
     const lp: u64 = @bitCast(lparam);
-    const scan_code: u32 = @intCast((lp >> 16) & 0xFF);
+    const extended: bool = (lp >> 24) & 0x1 != 0;
+    var scan_code: u32 = @intCast((lp >> 16) & 0xFF);
+    if (extended) scan_code |= 0xE000;
     const key = fromScanCode(scan_code);
 
     // If the scan code didn't map (e.g. some special keys), fall back
@@ -130,6 +135,12 @@ test "scan code mapping" {
     try std.testing.expectEqual(input.Key.space, fromScanCode(0x39));
     try std.testing.expectEqual(input.Key.escape, fromScanCode(0x01));
     try std.testing.expectEqual(input.Key.f1, fromScanCode(0x3B));
+
+    // Extended keys (0xE0 prefix) must map to the right Key.
+    try std.testing.expectEqual(input.Key.home, fromScanCode(0xE047));
+    try std.testing.expectEqual(input.Key.arrow_up, fromScanCode(0xE048));
+    try std.testing.expectEqual(input.Key.delete, fromScanCode(0xE053));
+
     // Unknown scan code maps to unidentified.
     try std.testing.expectEqual(input.Key.unidentified, fromScanCode(0xFFFF));
 }
