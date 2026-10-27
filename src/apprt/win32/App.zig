@@ -742,7 +742,15 @@ fn wndProc(
         },
 
         win32.WM_APP_CLIPBOARD_READ => {
-            if (surface) |s| s.completeClipboardPending();
+            // lParam carries a pointer to a heap-allocated
+            // ClipboardPending payload. Take ownership here.
+            if (surface) |s| {
+                if (lparam != 0) {
+                    const pending: *Surface.ClipboardPending =
+                        @ptrFromInt(@as(usize, @intCast(lparam)));
+                    s.completeClipboardPending(pending);
+                }
+            }
             return 0;
         },
 

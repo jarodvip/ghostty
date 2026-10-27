@@ -53,11 +53,7 @@ focused: bool = false,
 /// The saved high surrogate from a previous WM_CHAR, if any.
 surrogate_high: ?u16 = null,
 
-/// A clipboard read that was requested and is waiting to be delivered
-/// to the core surface on the main thread.
-clipboard_pending: ?ClipboardPending = null,
-
-const ClipboardPending = struct {
+pub const ClipboardPending = struct {
     req: apprt.ClipboardRequest,
     data: []u8,
 
@@ -135,8 +131,6 @@ pub fn init(
 }
 
 pub fn deinit(self: *Self) void {
-    if (self.clipboard_pending) |p| self.app.alloc.free(p.data);
-    self.clipboard_pending = null;
     if (self.core_surface) |s| {
         s.deinit();
         self.app.alloc.destroy(s);
@@ -274,17 +268,17 @@ pub fn clipboardRequest(
 
     switch (state) {
         // A Kitty read needs the clipboard text, delivered via the
-        // async completion path.
+        // async completion path. Each request gets its own heap-allocated
+        // pending struct, carried back through the posted message's
+        // lParam, so concurrent requests cannot overwrite each other.
         .kitty_read => {
             const data = try clipboard.read(alloc) orelse return .unavailable;
-
-            if (self.clipboard_pending) |p| alloc.free(p.data);
-            self.clipboard_pending = .{
-                .req = state,
-                .data = data,
-                .has_text = true,
-            };
-            _ = win32.user32.PostMessageW(self.hwnd, win32.WM_APP_CLIPBOARD_READ, 0, 0);
+            const pending = try alloc.create(ClipboardPending);
+            pending.* = .{ .req = state, .data = data, .has_text = true };
+            if (!postClipboardRead(self.hwnd, pending)) {
+                alloc.free(data);
+                alloc.destroy(pending);
+            }
             return .started;
         },
 
@@ -292,43 +286,37 @@ pub fn clipboardRequest(
         // calls setClipboard when the request is completed. We just
         // need to start the completion path.
         .kitty_write => {
-            if (self.clipboard_pending) |p| alloc.free(p.data);
-            self.clipboard_pending = .{
-                .req = state,
-                .data = &.{},
-                .has_text = false,
-            };
-            _ = win32.user32.PostMessageW(self.hwnd, win32.WM_APP_CLIPBOARD_READ, 0, 0);
+            const pending = try alloc.create(ClipboardPending);
+            pending.* = .{ .req = state, .data = &.{}, .has_text = false };
+            if (!postClipboardRead(self.hwnd, pending)) {
+                alloc.destroy(pending);
+            }
             return .started;
         },
 
         // A MIME listing request: report what we can serve.
         .list => {
-            // Cancel any previous pending read.
-            if (self.clipboard_pending) |p| alloc.free(p.data);
-            self.clipboard_pending = .{
+            const pending = try alloc.create(ClipboardPending);
+            pending.* = .{
                 .req = state,
                 .data = &.{},
                 .has_text = clipboard.hasText(),
             };
-            _ = win32.user32.PostMessageW(self.hwnd, win32.WM_APP_CLIPBOARD_READ, 0, 0);
+            if (!postClipboardRead(self.hwnd, pending)) {
+                alloc.destroy(pending);
+            }
             return .started;
         },
 
         // Direct paste and OSC 52 read both need the clipboard text.
         .paste, .osc_52_read => {
             const data = try clipboard.read(alloc) orelse return .unavailable;
-
-            // Cancel any previous pending read (shouldn't normally happen).
-            if (self.clipboard_pending) |p| alloc.free(p.data);
-            self.clipboard_pending = .{
-                .req = state,
-                .data = data,
-                .has_text = true,
-            };
-
-            // Wake up the message loop so the pending read is delivered.
-            _ = win32.user32.PostMessageW(self.hwnd, win32.WM_APP_CLIPBOARD_READ, 0, 0);
+            const pending = try alloc.create(ClipboardPending);
+            pending.* = .{ .req = state, .data = data, .has_text = true };
+            if (!postClipboardRead(self.hwnd, pending)) {
+                alloc.free(data);
+                alloc.destroy(pending);
+            }
             return .started;
         },
 
@@ -338,13 +326,25 @@ pub fn clipboardRequest(
     }
 }
 
+/// Post a clipboard-read completion message carrying a heap-allocated
+/// `ClipboardPending`. Returns false (and leaves ownership with the
+/// caller) if the message could not be posted, e.g. the window is gone.
+fn postClipboardRead(hwnd: win32.HWND, pending: *ClipboardPending) bool {
+    return win32.user32.PostMessageW(
+        hwnd,
+        win32.WM_APP_CLIPBOARD_READ,
+        0,
+        @intCast(@intFromPtr(pending)),
+    ) == win32.TRUE;
+}
+
 /// Complete a clipboard read that was posted to the message loop. This
 /// runs on the main thread and delivers the data to the core surface.
-pub fn completeClipboardPending(self: *Self) void {
-    const pending = self.clipboard_pending orelse return;
+pub fn completeClipboardPending(self: *Self, pending: *ClipboardPending) void {
+    const alloc = self.app.alloc;
     defer {
-        if (pending.data.len > 0) self.app.alloc.free(pending.data);
-        self.clipboard_pending = null;
+        if (pending.data.len > 0) alloc.free(pending.data);
+        alloc.destroy(pending);
     }
 
     switch (pending.req) {
