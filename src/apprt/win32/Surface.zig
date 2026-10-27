@@ -511,7 +511,14 @@ pub fn keyUp(self: *Self, wparam: win32.WPARAM, lparam: win32.LPARAM) !void {
 
 /// Handle a WM_CHAR / WM_SYSCHAR message. `wparam` is a UTF-16 code
 /// unit. We accumulate surrogate pairs and forward complete codepoints
-/// as UTF-8 to the core `textCallback`.
+/// as UTF-8 to the core via the keyboard input path.
+///
+/// Printable characters are sent as keyboard input (like GTK does), so
+/// they are encoded normally rather than through the clipboard paste
+/// path. Control characters (backspace, enter, tab, escape, ...) are
+/// emitted by the WM_KEYDOWN key-encoding path and are ignored here;
+/// routing them through text would re-encode them as paste (replacing
+/// control bytes with spaces and wrapping in bracketed-paste markers).
 pub fn charReceived(self: *Self, code_unit: u16) !void {
     // If this is a high surrogate, save it and wait for the low part.
     if (std.unicode.utf16IsHighSurrogate(code_unit)) {
@@ -520,7 +527,7 @@ pub fn charReceived(self: *Self, code_unit: u16) !void {
     }
 
     var utf8_buf: [4]u8 = undefined;
-    const utf8_len: usize = if (std.unicode.utf16IsLowSurrogate(code_unit) and
+    const cp: u21, const utf8_len: usize = if (std.unicode.utf16IsLowSurrogate(code_unit) and
         self.surrogate_high != null)
     blk: {
         const high = self.surrogate_high.?;
@@ -528,13 +535,24 @@ pub fn charReceived(self: *Self, code_unit: u16) !void {
         const cp = 0x10000 +
             (@as(u21, high) - 0xD800) * 0x400 +
             (@as(u21, code_unit) - 0xDC00);
-        break :blk std.unicode.utf8Encode(cp, &utf8_buf) catch return;
+        break :blk .{ cp, std.unicode.utf8Encode(cp, &utf8_buf) catch return };
     } else blk: {
         self.surrogate_high = null;
-        break :blk std.unicode.utf8Encode(code_unit, &utf8_buf) catch return;
+        break :blk .{ code_unit, std.unicode.utf8Encode(code_unit, &utf8_buf) catch return };
     };
+    const text = utf8_buf[0..utf8_len];
 
-    try self.core().textCallback(utf8_buf[0..utf8_len]);
+    // Control characters are sent by the WM_KEYDOWN path.
+    if (cp < 0x20 or cp == 0x7F) return;
+
+    const event = input.KeyEvent{
+        .action = .press,
+        .key = .unidentified,
+        .mods = keymap.mods(),
+        .utf8 = text,
+        .unshifted_codepoint = cp,
+    };
+    _ = try self.core().keyCallback(event);
 }
 
 /// Handle a mouse button message.
