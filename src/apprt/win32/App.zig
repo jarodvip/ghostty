@@ -692,11 +692,16 @@ fn wndProc(
         },
 
         win32.WM_DESTROY => {
-            // If the surface exists, tell the core app it's gone.
+            // Only quit the app when the last window is closed; other
+            // windows may still be open (multi-window support). Save the
+            // app pointer before destroySurface frees the surface.
             if (surface) |s| {
+                const app = s.app;
                 s.destroySurface();
+                if (app.surfaces.items.len == 0) {
+                    _ = win32.user32.PostQuitMessage(0);
+                }
             }
-            _ = win32.user32.PostQuitMessage(0);
             return 0;
         },
 
