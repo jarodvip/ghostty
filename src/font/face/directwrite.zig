@@ -355,11 +355,17 @@ pub const Face = struct {
         ))) return error.DirectWriteFailed;
         errdefer _ = new_face.?.Release();
 
-        const data = self.lib.alloc.dupe(u8, self.data) catch
-            return error.OutOfMemory;
-        errdefer self.lib.alloc.free(data);
-
-        var face = try initFace(self.lib, data, new_face.?, face_index, opts);
+        var face = if (self.hb_blob != null) blk: {
+            // File-bytes path: copy the data for the new face's HarfBuzz
+            // font.
+            const data = self.lib.alloc.dupe(u8, self.data) catch
+                return error.OutOfMemory;
+            errdefer self.lib.alloc.free(data);
+            break :blk try initFace(self.lib, data, new_face.?, face_index, opts);
+        } else blk: {
+            // IDWriteFont path: keep the table-callback HarfBuzz face.
+            break :blk try initFaceFromFontFace(self.lib, new_face.?, opts);
+        };
         errdefer face.deinit();
         face.synthetic = self.synthetic;
         if (simulations.bold) face.synthetic.bold = true;
@@ -423,6 +429,12 @@ pub const Face = struct {
 
         _ = self.font_face.Release();
         self.font_face = @ptrCast(new_face5.?);
+
+        // The HarfBuzz table callback (IDWriteFont path) must use the new
+        // face, otherwise it would dereference a released COM object.
+        if (self.hb_user_data) |ud| {
+            ud.font_face = @ptrCast(new_face5.?);
+        }
 
         // Update the HarfBuzz font variations for shaping.
         var hb_variations: [64]HbVariation = undefined;
