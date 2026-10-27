@@ -70,6 +70,41 @@ const HbTableData = struct {
     data: []u8,
 };
 
+/// Stable user data for `hb_face_create_for_tables`; lives on the heap so
+/// it does not dangle after face initialization returns.
+const HbUserData = struct {
+    alloc: Allocator,
+    font_face: *dwrite.IDWriteFontFace,
+};
+
+/// Copy an SFNT table from a DirectWrite font face.
+fn copyTableFromFace(
+    alloc: Allocator,
+    font_face: *dwrite.IDWriteFontFace,
+    tag: *const [4]u8,
+) Error!?[]u8 {
+    // DWrite expects the OpenType tag as a host-endian packed u32 with
+    // the first character in the low byte (see DWRITE_MAKE_OPENTYPE_TAG),
+    // unlike HarfBuzz/FreeType which use big-endian tags.
+    const tag_u32 =
+        (@as(u32, tag[3]) << 24) |
+        (@as(u32, tag[2]) << 16) |
+        (@as(u32, tag[1]) << 8) |
+        @as(u32, tag[0]);
+
+    var data: ?*const anyopaque = null;
+    var size: u32 = 0;
+    var ctx: ?*anyopaque = null;
+    var exists: dwrite.BOOL = dwrite.FALSE;
+    if (!dwrite.succeeded(font_face.TryGetFontTable(tag_u32, &data, &size, &ctx, &exists)))
+        return error.DirectWriteFailed;
+    defer if (ctx) |c| font_face.ReleaseFontTable(c);
+
+    if (exists != dwrite.TRUE or size == 0 or data == null) return null;
+    const bytes: []const u8 = @as([*]const u8, @ptrCast(data.?))[0..size];
+    return try alloc.dupe(u8, bytes);
+}
+
 fn destroyTableData(user_data: ?*anyopaque) callconv(.c) void {
     const td: *HbTableData = @ptrCast(@alignCast(user_data.?));
     td.alloc.free(td.data);
@@ -78,21 +113,22 @@ fn destroyTableData(user_data: ?*anyopaque) callconv(.c) void {
 
 fn hbReferenceTable(face: ?*anyopaque, tag: u32, user_data: ?*anyopaque) callconv(.c) ?*anyopaque {
     _ = face;
-    const f: *Face = @ptrCast(@alignCast(user_data.?));
+    const ud: *HbUserData = @ptrCast(@alignCast(user_data.?));
     const tag_bytes: [4]u8 = .{
         @truncate(tag >> 24),
         @truncate(tag >> 16),
         @truncate(tag >> 8),
         @truncate(tag),
     };
-    const table = (f.copyTable(f.alloc, &tag_bytes) catch return null) orelse return null;
+    const table = (copyTableFromFace(ud.alloc, ud.font_face, &tag_bytes) catch return null) orelse
+        return null;
     if (table.len == 0) return null;
 
-    const td = f.alloc.create(HbTableData) catch {
-        f.alloc.free(table);
+    const td = ud.alloc.create(HbTableData) catch {
+        ud.alloc.free(table);
         return null;
     };
-    td.* = .{ .alloc = f.alloc, .data = table };
+    td.* = .{ .alloc = ud.alloc, .data = table };
     return hb_blob_create(
         td.data.ptr,
         @intCast(td.data.len),
@@ -124,6 +160,9 @@ pub const Face = struct {
     /// Null when the face was created from an IDWriteFont (HarfBuzz uses
     /// the table callback instead).
     hb_blob: ?harfbuzz.Blob,
+
+    /// Stable user data for the HarfBuzz table callback (IDWriteFont path).
+    hb_user_data: ?*HbUserData = null,
 
     /// The current size this font is set to.
     size: font.face.DesiredSize,
@@ -257,6 +296,7 @@ pub const Face = struct {
         self.hb_font.destroy();
         if (self.hb_blob) |*b| b.destroy();
         _ = self.font_face.Release();
+        if (self.hb_user_data) |ud| self.lib.alloc.destroy(ud);
         if (self.loader) |l| {
             _ = self.lib.factory.UnregisterFontFileLoader(@ptrCast(l));
             _ = l.Release();
@@ -707,26 +747,7 @@ pub const Face = struct {
     /// Copy an SFNT table (for HarfBuzz). Returns null if the table does
     /// not exist in the font.
     pub fn copyTable(self: Face, alloc: Allocator, tag: *const [4]u8) Error!?[]u8 {
-        // DWrite expects the OpenType tag as a host-endian packed u32 with
-        // the first character in the low byte (see DWRITE_MAKE_OPENTYPE_TAG),
-        // unlike HarfBuzz/FreeType which use big-endian tags.
-        const tag_u32 =
-            (@as(u32, tag[3]) << 24) |
-            (@as(u32, tag[2]) << 16) |
-            (@as(u32, tag[1]) << 8) |
-            @as(u32, tag[0]);
-
-        var data: ?*const anyopaque = null;
-        var size: u32 = 0;
-        var ctx: ?*anyopaque = null;
-        var exists: dwrite.BOOL = dwrite.FALSE;
-        if (!dwrite.succeeded(self.font_face.TryGetFontTable(tag_u32, &data, &size, &ctx, &exists)))
-            return error.DirectWriteFailed;
-        defer if (ctx) |c| self.font_face.ReleaseFontTable(c);
-
-        if (exists != dwrite.TRUE or size == 0 or data == null) return null;
-        const bytes: []const u8 = @as([*]const u8, @ptrCast(data.?))[0..size];
-        return try alloc.dupe(u8, bytes);
+        return copyTableFromFace(alloc, self.font_face, tag);
     }
 
     /// Returns true if the font contains the given SFNT table.
@@ -767,7 +788,14 @@ fn initFaceFromFontFace(
     };
     errdefer _ = font_face.Release();
 
-    const hb_face = hb_face_create_for_tables(hbReferenceTable, @ptrCast(&result)) orelse
+    // The table callback needs stable user data; a stack address would
+    // dangle once this function returns.
+    const ud = try lib.alloc.create(HbUserData);
+    errdefer lib.alloc.destroy(ud);
+    ud.* = .{ .alloc = lib.alloc, .font_face = font_face };
+    result.hb_user_data = ud;
+
+    const hb_face = hb_face_create_for_tables(hbReferenceTable, ud) orelse
         return error.HarfbuzzFailed;
     defer hb_face_destroy(hb_face);
 
