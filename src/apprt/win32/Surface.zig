@@ -262,11 +262,11 @@ pub fn supportsClipboard(
     return clipboard.supports(clipboard_type);
 }
 
-/// Request clipboard contents. The Win32 clipboard API is synchronous,
-/// so we read the data here and then deliver it to the core surface on
-/// the next message-loop iteration via a custom window message. This
-/// keeps the completion out of the caller's stack (matching the
-/// asynchronous contract of `apprt.ClipboardReadResult.started`).
+/// Request clipboard contents. Reading the Win32 clipboard can block
+/// while another process holds it, so the actual read runs on a
+/// background thread; the result is delivered to the core surface via a
+/// custom window message on the main thread (matching the asynchronous
+/// contract of `apprt.ClipboardReadResult.started`).
 pub fn clipboardRequest(
     self: *Self,
     clipboard_type: apprt.Clipboard,
@@ -276,18 +276,13 @@ pub fn clipboardRequest(
     const alloc = self.app.alloc;
 
     switch (state) {
-        // A Kitty read needs the clipboard text, delivered via the
-        // async completion path. Each request gets its own heap-allocated
-        // pending struct, carried back through the posted message's
-        // lParam, so concurrent requests cannot overwrite each other.
-        .kitty_read => {
-            const data = try clipboard.read(alloc) orelse return .unavailable;
-            const pending = try alloc.create(ClipboardPending);
-            pending.* = .{ .req = state, .data = data, .has_text = true };
-            if (!postClipboardRead(self.hwnd, pending)) {
-                alloc.free(data);
-                alloc.destroy(pending);
-            }
+        // Text reads and MIME listing run on a background thread so the
+        // UI thread never blocks on OpenClipboard. Each request gets its
+        // own heap-allocated pending struct, carried back through the
+        // posted message's lParam, so concurrent requests cannot overwrite
+        // each other.
+        .kitty_read, .paste, .osc_52_read, .list => {
+            try self.startClipboardJob(state);
             return .started;
         },
 
@@ -303,35 +298,65 @@ pub fn clipboardRequest(
             return .started;
         },
 
-        // A MIME listing request: report what we can serve.
-        .list => {
-            const pending = try alloc.create(ClipboardPending);
-            pending.* = .{
-                .req = state,
-                .data = &.{},
-                .has_text = clipboard.hasText(),
-            };
-            if (!postClipboardRead(self.hwnd, pending)) {
-                alloc.destroy(pending);
-            }
-            return .started;
-        },
-
-        // Direct paste and OSC 52 read both need the clipboard text.
-        .paste, .osc_52_read => {
-            const data = try clipboard.read(alloc) orelse return .unavailable;
-            const pending = try alloc.create(ClipboardPending);
-            pending.* = .{ .req = state, .data = data, .has_text = true };
-            if (!postClipboardRead(self.hwnd, pending)) {
-                alloc.free(data);
-                alloc.destroy(pending);
-            }
-            return .started;
-        },
-
         // OSC 52 writes don't travel through clipboardRequest; they go
         // straight to the apprt setClipboard API.
         .osc_52_write => unreachable,
+    }
+}
+
+/// Start a background thread that reads the clipboard (or checks for
+/// text) and posts the result back to the main thread.
+fn startClipboardJob(self: *Self, state: apprt.ClipboardRequest) !void {
+    const alloc = self.app.alloc;
+    const job = try alloc.create(ClipboardJob);
+    job.* = .{
+        .alloc = alloc,
+        .hwnd = self.hwnd,
+        .req = state,
+    };
+    const thread = std.Thread.spawn(.{}, clipboardJobRun, .{job}) catch |err| {
+        alloc.destroy(job);
+        return err;
+    };
+    thread.detach();
+}
+
+const ClipboardJob = struct {
+    alloc: Allocator,
+    hwnd: win32.HWND,
+    req: apprt.ClipboardRequest,
+};
+
+/// Run on a background thread: read the clipboard, then post the
+/// result to the window for delivery on the main thread.
+fn clipboardJobRun(job: *ClipboardJob) void {
+    defer job.alloc.destroy(job);
+    const alloc = job.alloc;
+
+    const data: ?[]u8 = switch (job.req) {
+        .list => null,
+        else => clipboard.read(alloc) catch |err| {
+            log.warn("clipboard read failed err={}", .{err});
+            return;
+        },
+    };
+    const has_text: bool = switch (job.req) {
+        .list => clipboard.hasText(),
+        else => data != null,
+    };
+
+    const pending = alloc.create(ClipboardPending) catch {
+        if (data) |d| alloc.free(d);
+        return;
+    };
+    pending.* = .{
+        .req = job.req,
+        .data = data orelse &.{},
+        .has_text = has_text,
+    };
+    if (!postClipboardRead(job.hwnd, pending)) {
+        if (data) |d| alloc.free(d);
+        alloc.destroy(pending);
     }
 }
 
