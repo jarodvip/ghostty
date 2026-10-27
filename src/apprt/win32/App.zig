@@ -158,7 +158,9 @@ fn newSurface(self: *App, working_directory: ?[]const u8) !void {
     self.windows_open = true;
 
     // The first window is the primary window for wakeups.
-    if (self.surfaces.items.len == 1) self.hwnd = hwnd;
+    if (self.surfaces.items.len == 1) {
+        @atomicStore(?win32.HWND, &self.hwnd, hwnd, .seq_cst);
+    }
 
     // Show the window.
     _ = win32.user32.ShowWindow(hwnd, win32.user32.SW_SHOW);
@@ -481,17 +483,21 @@ fn ipcServerThread(app: *App) void {
         };
         // If no window is open (shouldn't normally happen), drop the
         // request; the payload is freed below via errdefer-like logic.
-        const h = app.hwnd orelse {
+        const h = @atomicLoad(?win32.HWND, &app.hwnd, .seq_cst) orelse {
             app.alloc.free(msg.data);
             app.alloc.destroy(msg);
             continue;
         };
-        _ = win32.user32.PostMessageW(
+        if (win32.user32.PostMessageW(
             h,
             win32.WM_APP_NEW_WINDOW,
             0,
             @intCast(@intFromPtr(msg)),
-        );
+        ) == win32.FALSE) {
+            // The window is gone; release the payload.
+            app.alloc.free(msg.data);
+            app.alloc.destroy(msg);
+        }
     }
 }
 

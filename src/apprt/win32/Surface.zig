@@ -182,12 +182,14 @@ pub fn destroySurface(self: *Self) void {
     }
 
     // If we just destroyed the app's primary window, repoint it at any
-    // remaining window so wakeups and IPC keep working.
+    // remaining window so wakeups and IPC keep working. The IPC thread
+    // reads `hwnd` from another thread, so this store must be atomic.
     if (self.app.hwnd == self.hwnd) {
-        self.app.hwnd = if (self.app.surfaces.items.len > 0)
+        const new_hwnd: ?win32.HWND = if (self.app.surfaces.items.len > 0)
             self.app.surfaces.items[0].hwnd
         else
             null;
+        @atomicStore(?win32.HWND, &self.app.hwnd, new_hwnd, .seq_cst);
     }
 
     self.app.windows_open = self.app.surfaces.items.len > 0;
