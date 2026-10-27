@@ -269,6 +269,12 @@ exhaustive switches (`hasFreetype`, `hasHarfbuzz`, etc.). The existing
   `... -Dfont-backend=freetype_windows`), run the apps, and compare
   text rendering, metrics, fallback, variable fonts, and color glyphs
   (color glyphs currently fail on directwrite).
+- Release build: `zig build -Dtarget=x86_64-windows-gnu
+  -Dapp-runtime=win32 -Doptimize=ReleaseFast -Dstrip=false`.
+  `-Dstrip=false` is required because Zig 0.17.0's mingw-w64 CRT fails
+  to compile with omit-frame-pointer (`-Dstrip` defaults to true in
+  release), producing a `.seh_ directive must appear within an active
+  frame` error in crtexe.c.
 - Test: CJK fallback, emoji (color font), variable font axes
   (`font-variation-settings`), synthetic bold/italic.
 - Compare `+list-fonts` output with `freetype_windows`.
