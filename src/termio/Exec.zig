@@ -1814,6 +1814,11 @@ pub const ReadThread = struct {
                         // Check for a quit signal
                         .OPERATION_ABORTED => break,
 
+                        // The child process exited (or the ConPTY output
+                        // pipe closed), so there is no more output. This is
+                        // the normal end of the read thread.
+                        .BROKEN_PIPE, .HANDLE_EOF => return,
+
                         else => {
                             log.err("io reader error err={}", .{err});
                             unreachable;
