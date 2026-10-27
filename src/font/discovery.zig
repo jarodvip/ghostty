@@ -1560,6 +1560,13 @@ pub const DirectWrite = struct {
                 if (style != 2) return false; // DWRITE_FONT_STYLE_ITALIC
             }
 
+            // Style string filter (e.g. "Regular", "Bold Italic").
+            if (self.desc.style) |style| {
+                var buf: [256]u8 = undefined;
+                const actual = try self.fontFaceName(font, &buf);
+                if (!std.ascii.eqlIgnoreCase(style, actual)) return false;
+            }
+
             // Codepoint support filter.
             if (self.desc.codepoint > 0) {
                 var exists: dwrite.BOOL = dwrite.FALSE;
@@ -1568,6 +1575,25 @@ pub const DirectWrite = struct {
             }
 
             return true;
+        }
+
+        fn fontFaceName(self: *DiscoverIterator, font: *dwrite.IDWriteFont, buf: []u8) ![]const u8 {
+            _ = self;
+            var names: ?*dwrite.IDWriteLocalizedStrings = null;
+            if (!dwrite.succeeded(font.GetFaceNames(&names))) return "";
+            defer _ = names.?.Release();
+
+            const count = names.?.GetCount();
+            if (count == 0) return "";
+
+            var len: u32 = 0;
+            _ = names.?.GetStringLength(0, &len);
+            if (len == 0 or len >= 256) return "";
+
+            var utf16_buf: [256]u16 = undefined;
+            _ = names.?.GetString(0, &utf16_buf, len + 1);
+            const out_len = std.unicode.utf16LeToUtf8(buf, utf16_buf[0..len]) catch return "";
+            return buf[0..out_len];
         }
 
         fn makeDeferredFace(self: *DiscoverIterator, font: *dwrite.IDWriteFont) !DeferredFace {

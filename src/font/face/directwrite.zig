@@ -505,6 +505,21 @@ pub const Face = struct {
         const glyph_id: u16 = @intCast(glyph_index);
         const glyphs: [*]const u16 = @ptrCast(&glyph_id);
 
+        const identity = dwrite.DWRITE_MATRIX{
+            .m11 = 1,
+            .m12 = 0,
+            .m21 = 0,
+            .m22 = 1,
+            .dx = 0,
+            .dy = 0,
+        };
+
+        // Fast path: an unconstrained glyph renders at its natural size,
+        // so no measurement pass is needed (single glyph run analysis).
+        if (!opts.constraint.doesAnything()) {
+            return self.rasterize(glyphs, em_size, cell_height, cell_baseline, &identity, alloc, atlas);
+        }
+
         // Measure the glyph's hint-adjusted black box at the requested size
         // using an identity transform. This is relative to the baseline and
         // feeds the constraint system.
