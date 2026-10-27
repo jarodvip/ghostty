@@ -339,7 +339,7 @@ pub const IDWriteFactory = extern struct {
         ) callconv(.winapi) HRESULT,
     };
 
-    pub inline fn Release(self: *IDWriteFactory) u32 {
+        pub inline fn Release(self: *IDWriteFactory) u32 {
         return self.vtbl.base.Release(@ptrCast(self));
     }
 

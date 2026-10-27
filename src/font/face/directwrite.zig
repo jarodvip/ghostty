@@ -355,7 +355,10 @@ pub const Face = struct {
         ))) return error.DirectWriteFailed;
         errdefer _ = new_face.?.Release();
 
-        var face = if (self.hb_blob != null) blk: {
+        // Use the same canonical discriminator as setVariations: a face
+        // created from an IDWriteFont has hb_user_data set (table callback),
+        // while file-bytes faces have hb_blob set and hb_user_data null.
+        var face = if (self.hb_user_data == null) blk: {
             // File-bytes path: copy the data for the new face's HarfBuzz
             // font.
             const data = self.lib.alloc.dupe(u8, self.data) catch
@@ -427,14 +430,15 @@ pub const Face = struct {
             &new_face5,
         ))) return error.DirectWriteFailed;
 
-        _ = self.font_face.Release();
-        self.font_face = @ptrCast(new_face5.?);
-
-        // The HarfBuzz table callback (IDWriteFont path) must use the new
-        // face, otherwise it would dereference a released COM object.
+        // Point the HarfBuzz table callback at the new face BEFORE releasing
+        // the old one, so there is no window where it could dereference a
+        // released COM object.
+        const new_face: *dwrite.IDWriteFontFace = @ptrCast(new_face5.?);
         if (self.hb_user_data) |ud| {
-            ud.font_face = @ptrCast(new_face5.?);
+            ud.font_face = new_face;
         }
+        _ = self.font_face.Release();
+        self.font_face = new_face;
 
         // Update the HarfBuzz font variations for shaping.
         var hb_variations: [64]HbVariation = undefined;
@@ -813,7 +817,9 @@ fn initFaceFromFontFace(
         .hb_font = undefined,
         .size = opts.size,
     };
-    errdefer _ = font_face.Release();
+
+    // Note: `font_face` ownership stays with the caller; on error the
+    // caller's errdefer releases it (same convention as `initFace`).
 
     // The table callback needs stable user data; a stack address would
     // dangle once this function returns.

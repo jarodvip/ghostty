@@ -1526,27 +1526,16 @@ pub const DirectWrite = struct {
         fn familyMatches(self: *DiscoverIterator, family: *dwrite.IDWriteFontFamily) !bool {
             const family_name = self.desc.family orelse return true;
             var buf: [512]u8 = undefined;
-            const actual = try self.familyName(family, &buf);
+            const actual = self.familyName(family, &buf);
             return std.ascii.eqlIgnoreCase(family_name, actual);
         }
 
-        fn familyName(self: *DiscoverIterator, family: *dwrite.IDWriteFontFamily, buf: []u8) ![]const u8 {
+        fn familyName(self: *DiscoverIterator, family: *dwrite.IDWriteFontFamily, buf: []u8) []const u8 {
             _ = self;
             var names: ?*dwrite.IDWriteLocalizedStrings = null;
             if (!dwrite.succeeded(family.GetFamilyNames(&names))) return "";
             defer _ = names.?.Release();
-
-            const count = names.?.GetCount();
-            if (count == 0) return "";
-
-            var len: u32 = 0;
-            _ = names.?.GetStringLength(0, &len);
-            if (len == 0 or len >= 256) return "";
-
-            var utf16_buf: [256]u16 = undefined;
-            _ = names.?.GetString(0, &utf16_buf, len + 1);
-            const out_len = std.unicode.utf16LeToUtf8(buf, utf16_buf[0..len]) catch return "";
-            return buf[0..out_len];
+            return localizedString(names.?, buf);
         }
 
         fn fontMatches(self: *DiscoverIterator, font: *dwrite.IDWriteFont) !bool {
@@ -1561,10 +1550,20 @@ pub const DirectWrite = struct {
             }
 
             // Style string filter (e.g. "Regular", "Bold Italic").
+            // Fail open: face names are localized (e.g. "Fett" for "Bold")
+            // and reads can fail; only exclude a font when we actually read
+            // a comparable ASCII name that differs.
             if (self.desc.style) |style| {
-                var buf: [256]u8 = undefined;
-                const actual = try self.fontFaceName(font, &buf);
-                if (!std.ascii.eqlIgnoreCase(style, actual)) return false;
+                var buf: [512]u8 = undefined;
+                const actual = self.fontFaceName(font, &buf);
+                const actual_is_ascii = blk: {
+                    for (actual) |c| {
+                        if (!std.ascii.isAscii(c)) break :blk false;
+                    }
+                    break :blk true;
+                };
+                if (actual.len > 0 and actual_is_ascii and
+                    !std.ascii.eqlIgnoreCase(style, actual)) return false;
             }
 
             // Codepoint support filter.
@@ -1577,23 +1576,12 @@ pub const DirectWrite = struct {
             return true;
         }
 
-        fn fontFaceName(self: *DiscoverIterator, font: *dwrite.IDWriteFont, buf: []u8) ![]const u8 {
+        fn fontFaceName(self: *DiscoverIterator, font: *dwrite.IDWriteFont, buf: []u8) []const u8 {
             _ = self;
             var names: ?*dwrite.IDWriteLocalizedStrings = null;
             if (!dwrite.succeeded(font.GetFaceNames(&names))) return "";
             defer _ = names.?.Release();
-
-            const count = names.?.GetCount();
-            if (count == 0) return "";
-
-            var len: u32 = 0;
-            _ = names.?.GetStringLength(0, &len);
-            if (len == 0 or len >= 256) return "";
-
-            var utf16_buf: [256]u16 = undefined;
-            _ = names.?.GetString(0, &utf16_buf, len + 1);
-            const out_len = std.unicode.utf16LeToUtf8(buf, utf16_buf[0..len]) catch return "";
-            return buf[0..out_len];
+            return localizedString(names.?, buf);
         }
 
         fn makeDeferredFace(self: *DiscoverIterator, font: *dwrite.IDWriteFont) !DeferredFace {
@@ -1607,3 +1595,26 @@ pub const DirectWrite = struct {
         }
     };
 };
+
+/// Read the first string from a DirectWrite localized string table.
+/// Returns "" if the table is empty, unreadable, or the name cannot fit
+/// in `buf` (UTF-8). No error union: discovery must not fail the whole
+/// scan because a single name could not be read.
+fn localizedString(names: *dwrite.IDWriteLocalizedStrings, buf: []u8) []const u8 {
+    const count = names.GetCount();
+    if (count == 0) return "";
+
+    var len: u32 = 0;
+    _ = names.GetStringLength(0, &len);
+    if (len == 0) return "";
+
+    // UTF-16 units; BMP characters expand to at most 3 UTF-8 bytes each.
+    // Guard against overflowing the caller's UTF-8 buffer.
+    const units: usize = len;
+    if (units > 512 or units * 3 > buf.len) return "";
+
+    var utf16_buf: [512]u16 = undefined;
+    _ = names.GetString(0, &utf16_buf, len + 1);
+    const out_len = std.unicode.utf16LeToUtf8(buf, utf16_buf[0..units]) catch return "";
+    return buf[0..out_len];
+}
