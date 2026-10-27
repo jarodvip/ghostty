@@ -236,17 +236,17 @@ pub fn getTitle(self: *Self) ?[:0]const u8 {
 /// Set the title of the window. The title is UTF-8; convert to UTF-16
 /// for SetWindowTextW.
 pub fn setTitle(self: *Self, title: [:0]const u8) !void {
-    // Convert UTF-8 to UTF-16.
-    const utf16 = try std.unicode.utf8ToUtf16LeAlloc(self.app.alloc, title);
-    defer self.app.alloc.free(utf16);
+    // Convert UTF-8 to UTF-16 (no NUL terminator from the allocator).
+    const utf16_src = try std.unicode.utf8ToUtf16LeAlloc(self.app.alloc, title);
+    defer self.app.alloc.free(utf16_src);
 
-    // Set the window title (UTF-16 NUL terminated).
-    var buf: [1024:0]u16 = undefined;
-    if (utf16.len + 1 <= buf.len) {
-        @memcpy(buf[0..utf16.len], utf16);
-        buf[utf16.len] = 0;
-        _ = win32.user32.SetWindowTextW(self.hwnd, &buf);
-    }
+    // Set the window title (UTF-16 NUL terminated). Allocate so long
+    // titles (e.g. OSC 0/2 with long paths) are not silently dropped.
+    const utf16 = try self.app.alloc.alloc(u16, utf16_src.len + 1);
+    defer self.app.alloc.free(utf16);
+    @memcpy(utf16[0..utf16_src.len], utf16_src);
+    utf16[utf16_src.len] = 0;
+    _ = win32.user32.SetWindowTextW(self.hwnd, @ptrCast(utf16.ptr));
 
     // Store the UTF-8 title.
     if (self.title) |old| self.app.alloc.free(old);
