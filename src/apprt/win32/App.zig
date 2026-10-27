@@ -212,8 +212,16 @@ pub fn terminate(self: *App) void {
 /// Wake up the event loop. Called by the core app when the mailbox
 /// needs draining.
 pub fn wakeup(self: *App) void {
-    // If no windows are open there's nothing to wake.
-    if (self.hwnd) |h| _ = win32.user32.PostMessageW(h, win32.WM_APP, 0, 0);
+    // If no windows are open there's nothing to wake. The IPC thread
+    // reads hwnd, so load it atomically.
+    const h = @atomicLoad(?win32.HWND, &self.hwnd, .seq_cst) orelse return;
+    if (win32.user32.PostMessageW(h, win32.WM_APP, 0, 0) == win32.FALSE) {
+        // The window is being destroyed or the message queue is full;
+        // drain the core mailbox directly so wakeups are not lost.
+        self.core_app.tick(self) catch |err| {
+            log.warn("failed to tick core app on wakeup err={}", .{err});
+        };
+    }
 }
 
 pub fn performAction(
