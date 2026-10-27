@@ -1445,6 +1445,7 @@ test "face metrics" {
             .coretext_harfbuzz,
             .coretext_noshape,
             => 7.3828125,
+            .directwrite => unreachable,
             .web_canvas => unreachable,
         },
         .ascent = 12.3046875,
@@ -1465,6 +1466,7 @@ test "face metrics" {
             .coretext_harfbuzz,
             .coretext_noshape,
             => 16.0,
+            .directwrite => unreachable,
             .web_canvas => unreachable,
         },
     };
@@ -1479,6 +1481,7 @@ test "face metrics" {
             .coretext_harfbuzz,
             .coretext_noshape,
             => 9.6,
+            .directwrite => unreachable,
             .web_canvas => unreachable,
         },
         .ascent = 14.72,
@@ -1499,6 +1502,7 @@ test "face metrics" {
             .coretext_harfbuzz,
             .coretext_noshape,
             => 15.472000000000001,
+            .directwrite => unreachable,
             .web_canvas => unreachable,
         },
     };

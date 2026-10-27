@@ -317,6 +317,16 @@ pub fn add(
         }
     }
 
+    // DirectWrite (Windows font backend). Only linked when the DirectWrite
+    // backend is selected; the default freetype_windows backend does not
+    // use it. dwrite.lib ships with the Windows SDK (MSVC) and with MinGW,
+    // so both common Windows ABIs resolve it. ole32 provides the COM
+    // runtime (CoInitializeEx) that DirectWrite requires.
+    if (self.config.font_backend == .directwrite) {
+        step.root_module.linkSystemLibrary("dwrite", dynamic_link_opts);
+        step.root_module.linkSystemLibrary("ole32", dynamic_link_opts);
+    }
+
     // Libpng - Ghostty doesn't actually use this directly, its only used
     // through dependencies, so we only need to add it to our static
     // libs list if we're not using system integration. The dependencies

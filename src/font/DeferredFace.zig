@@ -10,6 +10,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const fontconfig = @import("fontconfig");
 const macos = @import("macos");
+const dwrite = @import("directwrite.zig");
 const font = @import("main.zig");
 const options = @import("main.zig").options;
 const Library = @import("main.zig").Library;
@@ -29,6 +30,10 @@ ct: if (font.Discover == font.discovery.CoreText) ?CoreText else void =
 /// Windows (FreeType directory scan)
 win: if (options.backend == .freetype_windows) ?Windows else void =
     if (options.backend == .freetype_windows) null else {},
+
+/// DirectWrite (system font collection)
+dw: if (options.backend == .directwrite) ?DirectWrite else void =
+    if (options.backend == .directwrite) null else {},
 
 /// Canvas
 wc: if (options.backend == .web_canvas) ?WebCanvas else void =
@@ -91,6 +96,58 @@ pub const Windows = struct {
     }
 };
 
+/// DirectWrite specific data. Only present with the directwrite backend.
+pub const DirectWrite = struct {
+    /// The IDWriteFont (COM reference owned here).
+    font: *dwrite.IDWriteFont,
+
+    /// Variations to apply on load.
+    variations: []const font.face.Variation,
+
+    /// Whether the face presents as emoji (has color glyphs) or text.
+    presentation: Presentation,
+
+    /// Returns the family name of this font.
+    pub fn familyName(self: *const DirectWrite, buf: []u8) ![]const u8 {
+        var family: ?*dwrite.IDWriteFontFamily = null;
+        if (!dwrite.succeeded(self.font.GetFontFamily(&family))) return "";
+        defer _ = family.?.Release();
+
+        var names: ?*dwrite.IDWriteLocalizedStrings = null;
+        if (!dwrite.succeeded(family.?.GetFamilyNames(&names))) return "";
+        defer _ = names.?.Release();
+        return localizedString(names.?, buf);
+    }
+
+    /// Returns the face name (first localized string from GetFaceNames).
+    pub fn name(self: *const DirectWrite, buf: []u8) ![]const u8 {
+        var names: ?*dwrite.IDWriteLocalizedStrings = null;
+        if (!dwrite.succeeded(self.font.GetFaceNames(&names))) return "";
+        defer _ = names.?.Release();
+        return localizedString(names.?, buf);
+    }
+
+    pub fn deinit(self: *DirectWrite) void {
+        _ = self.font.Release();
+        self.* = undefined;
+    }
+};
+
+/// Read the first string from a localized string table into `buf`.
+fn localizedString(names: *dwrite.IDWriteLocalizedStrings, buf: []u8) ![]const u8 {
+    const count = names.GetCount();
+    if (count == 0) return "";
+
+    var len: u32 = 0;
+    _ = names.GetStringLength(0, &len);
+    if (len == 0 or len >= 256) return "";
+
+    var utf16_buf: [256]u16 = undefined;
+    _ = names.GetString(0, &utf16_buf, len + 1);
+    const out_len = std.unicode.utf16LeToUtf8(buf, utf16_buf[0..len]) catch return "";
+    return buf[0..out_len];
+}
+
 /// CoreText specific data. This is only present when building with CoreText.
 pub const CoreText = struct {
     /// The initialized font
@@ -128,6 +185,7 @@ pub fn deinit(self: *DeferredFace) void {
     switch (options.backend) {
         .fontconfig_freetype => if (self.fc) |*fc| fc.deinit(),
         .freetype => {},
+        .directwrite => if (self.dw) |*dw| dw.deinit(),
         .freetype_windows => if (self.win) |*w| w.deinit(),
         .web_canvas => if (self.wc) |*wc| wc.deinit(),
         .coretext,
@@ -143,6 +201,8 @@ pub fn deinit(self: *DeferredFace) void {
 pub fn familyName(self: DeferredFace, buf: []u8) ![]const u8 {
     switch (options.backend) {
         .freetype => {},
+
+        .directwrite => if (self.dw) |dw| return try dw.familyName(buf),
 
         .freetype_windows => if (self.win) |w| return try w.peek.name(buf),
 
@@ -173,6 +233,8 @@ pub fn familyName(self: DeferredFace, buf: []u8) ![]const u8 {
 pub fn name(self: DeferredFace, buf: []u8) ![]const u8 {
     switch (options.backend) {
         .freetype => {},
+
+        .directwrite => if (self.dw) |dw| return try dw.name(buf),
 
         .freetype_windows => if (self.win) |w| return try w.peek.name(buf),
 
@@ -211,6 +273,7 @@ pub fn load(
     return switch (options.backend) {
         .fontconfig_freetype => try self.loadFontconfig(lib, opts),
         .freetype_windows => try self.loadWindows(lib, opts),
+        .directwrite => try self.loadDirectWrite(lib, opts),
         .coretext, .coretext_harfbuzz, .coretext_noshape => try self.loadCoreText(lib, opts),
         .coretext_freetype => try self.loadCoreTextFreetype(lib, opts),
         .web_canvas => try self.loadWebCanvas(opts),
@@ -219,6 +282,18 @@ pub fn load(
         // proper configuration for one of the other deferred mechanisms.
         .freetype => unreachable,
     };
+}
+
+fn loadDirectWrite(
+    self: *DeferredFace,
+    lib: Library,
+    opts: font.face.Options,
+) !Face {
+    const dw = self.dw.?;
+    var face = try Face.initFont(lib, dw.font, opts);
+    errdefer face.deinit();
+    try face.setVariations(dw.variations, opts);
+    return face;
 }
 
 fn loadFontconfig(
@@ -413,6 +488,14 @@ pub fn hasCodepoint(self: DeferredFace, cp: u32, p: ?Presentation) bool {
         },
 
         .freetype => {},
+        .directwrite => {
+            if (self.dw) |dw| {
+                if (p) |desired| if (dw.presentation != desired) return false;
+                var exists: dwrite.BOOL = dwrite.FALSE;
+                _ = dw.font.HasCharacter(cp, &exists);
+                return exists == dwrite.TRUE;
+            }
+        },
     }
 
     // This is unreachable because discovery mechanisms terminate, and
@@ -529,3 +612,4 @@ test "coretext" {
     defer face.deinit();
     try testing.expect(face.glyphIndex(' ') != null);
 }
+

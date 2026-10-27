@@ -272,6 +272,7 @@ pub const RenderGlyphError = error{
     CouldNotFindContext,
     DebugOpCode,
     DeferredLoadingUnavailable,
+    DirectWriteFailed,
     DivideByZero,
     ENDFInExecStream,
     ExecutionTooLong,
@@ -328,6 +329,7 @@ pub const RenderGlyphError = error{
     InvalidVersion,
     InvalidVertMetrics,
     InvalidWidth,
+    InvalidFont,
     LocationsMissing,
     LowerModuleVersion,
     MathError,
@@ -346,6 +348,7 @@ pub const RenderGlyphError = error{
     NestedFrameAccess,
     NoCurrentPoint,
     NoUnicodeGlyphName,
+    NotImplemented,
     OutOfMemory,
     PathNotClosed,
     PixelSourceNotPreMultiplied,
@@ -371,6 +374,7 @@ pub const RenderGlyphError = error{
     UnknownFreetypeError,
     UnlistedObject,
     UnsupportedGlyphFormat,
+    VariableFontUnsupported,
     WrongAtlas,
 };
 

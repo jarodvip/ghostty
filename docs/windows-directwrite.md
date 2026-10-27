@@ -1,14 +1,33 @@
 # Windows DirectWrite Font Backend — Design
 
-## Status: Partial Skeleton
+## Status: Functional Rendering
 
 This document is a design proposal for adding a DirectWrite font
-backend to the Win32 apprt. A **compilable skeleton** exists at
-`src/font/face/directwrite.zig` (Face interface stubs returning
-`error.NotImplemented`); it is **not yet wired into the build**
-(`Backend.directwrite` does not exist yet). The current Windows build
-uses the `freetype_windows` backend (FreeType rendering + HarfBuzz
-shaping + a Windows font-directory scanner), which is functional.
+backend to the Win32 apprt. The backend is **wired into the build**
+(`Backend.directwrite` exists, `-Dfont-backend=directwrite` builds) and
+implements `src/font/face/directwrite.zig` with minimal COM bindings in
+`src/font/directwrite.zig`:
+
+- `initFile` and in-memory `init` (via a custom
+  `IDWriteFontFileStream`/`IDWriteFontFileLoader`), `name`,
+  `glyphIndex`, `copyTable`, `hasColor`, `getMetrics`, `setSize`,
+  `syntheticBold`/`syntheticItalic`, `renderGlyph`, and `setVariations`
+  work.
+- `setVariations` creates a new face with the requested axis values via
+  `IDWriteFontFace5::GetFontResource` + `IDWriteFontResource::CreateFontFace`.
+- `renderGlyph` rasterizes via `IDWriteGlyphRunAnalysis` into grayscale
+  alpha with **antialiasing**: it uses the ClearType 3x1 texture
+  (`DWRITE_RENDERING_MODE_NATURAL`) and converts each pixel's RGB
+  sub-pixel values to a grayscale alpha. Color glyphs (emoji) are not
+  supported yet.
+- Discovery uses the system font collection (`GetSystemFontCollection`
+  + `IDWriteFontCollection`/`IDWriteFontFamily`/`IDWriteFont`), and
+  deferred faces hold an `IDWriteFont` reference; `+list-fonts` works.
+- Grayscale antialiasing remains as future work.
+
+The current Windows default remains the `freetype_windows` backend
+(FreeType rendering + HarfBuzz shaping + a Windows font-directory
+scanner), which is functional.
 
 ## Motivation
 
@@ -82,53 +101,71 @@ must implement:
 
 ### New Backend Value
 
-Add `directwrite` to `Backend` in `src/font/backend.zig`. Set it as the
-Windows default:
+`directwrite` was added to `Backend` in `src/font/backend.zig`, and the
+exhaustive switches in `face.zig`, `library.zig`, `shape.zig`,
+`discovery.zig`, `DeferredFace.zig`, and the `Collection` tests were
+updated. `-Dfont-backend=directwrite` now builds, and **DirectWrite is
+the Windows default**.
 
-```zig
-if (target.os.tag == .windows) return .directwrite;
-```
-
-Keep `.freetype_windows` available as a build option for testing and
+`.freetype_windows` remains available as a build option for testing and
 for environments where DirectWrite is unavailable.
 
 ### COM/DWrite Bindings
 
-DirectWrite is a COM API. Create `src/font/face/directwrite.zig` and a
-support module `src/font/directwrite.zig` (or `src/os/directwrite.zig`)
-containing:
+DirectWrite is a COM API. A support module `src/font/directwrite.zig`
+now exists with manual vtable bindings (Zig has no stdlib COM layer) for:
 
-- `DWriteCreateFactory` (dwrite.dll)
-- COM interfaces via `@interface`-style bindings or raw vtable
-  wrappers: `IDWriteFactory`, `IDWriteFontCollection`,
-  `IDWriteFontFamily`, `IDWriteFont`, `IDWriteFontFace`,
-  `IDWriteFontFace1..5` (for variable fonts), `IDWriteTextFormat`,
-  `IDWriteTextLayout`, `IDWriteRenderingParams`.
-- `IDWriteFontFile`, `IDWriteFontFileStream` for loading in-memory fonts.
-- GDI interop: `IDWriteGdiInterop` for converting to `LOGFONT`/`HFONT`
-  (optional).
+- `DWriteCreateFactory` (dwrite.dll) and `CoInitializeEx` (ole32.dll).
+- `IDWriteFactory` (subset: `CreateFontFileReference`, `CreateFontFace`).
+- `IDWriteFontFile` and `IDWriteFontFace` (metrics, glyph indices,
+  design glyph metrics, `TryGetFontTable`/`ReleaseFontTable`).
+- `DWRITE_FONT_METRICS` / `DWRITE_GLYPH_METRICS`, font face type and
+  simulation enums.
 
-Zig does not yet have a standard COM binding layer in the stdlib, so
-these are manual vtable bindings. The project already does this for
-Objective-C via `zig_objc`; a similar approach (or a small `com.zig`
-helper) is needed here.
+Still missing for future work:
+
+- `IDWriteFontCollection` / `IDWriteFontFamily` / `IDWriteFont` /
+  `IDWriteLocalizedStrings` for discovery.
+- `IDWriteFontFileStream` / `IDWriteFontFileLoader` for in-memory fonts.
+- `IDWriteGlyphRunAnalysis` / `IDWriteRenderingParams` for
+  rasterization.
+- `IDWriteFontFace1..5` for variable fonts.
+- `IDWriteFontFallback` for codepoint fallback.
+- GDI interop: `IDWriteGdiInterop` for `LOGFONT`/`HFONT` (optional).
 
 ### Face Implementation
 
-`directwrite.zig` implements the `Face` interface:
+`src/font/face/directwrite.zig` implements the `Face` interface:
 
-- `initFile` / `init`: create an `IDWriteFactory`, load the font file
-  via `CreateFontFileReference` or `CreateCustomFontFileReference`
-  (in-memory), create an `IDWriteFontFace`, and cache it.
-- `setSize`: store the DIP/px size; rasterization uses the font face
-  metrics directly (DirectWrite works in DIPs; convert via DPI).
-- `renderGlyph`: use `IDWriteFontFace::GetGlyphRunOutline` (returns
-  `IDWriteGeometry`) + `IDWriteGlyphRunAnalysis` for alpha coverage, or
-  use FreeType just for rasterization with DirectWrite only for
-  discovery. The former is the "full DirectWrite" path.
-- `copyTable`: `IDWriteFontFace::TryGetFontTable` for HarfBuzz.
-- `getMetrics`: `GetDesignGlyphMetrics` + `GetMetrics` for face
-  metrics.
+- `initFile`: reads the font file, creates an `IDWriteFontFace` via
+  `CreateFontFileReference` + `CreateFontFace`, and builds the
+  HarfBuzz font from the file bytes.
+- `init` (in-memory): copies the bytes and serves them through a custom
+  `IDWriteFontFileStream`/`IDWriteFontFileLoader` (registered via
+  `RegisterFontFileLoader`), then creates the face with
+  `CreateCustomFontFileReference` + `CreateFontFace`.
+- `name`: parses the SFNT 'name' table (name ID 1) into the caller's
+  buffer.
+- `setSize`: stores the size and updates the HarfBuzz font scale.
+- `setVariations`: queries `IDWriteFontFace5`, gets the
+  `IDWriteFontResource`, and creates a new font face with the requested
+  `DWRITE_FONT_AXIS_VALUE`s via `CreateFontFace`; the HarfBuzz font's
+  variations are updated too.
+- `renderGlyph`: rasterizes with `IDWriteGlyphRunAnalysis`
+  (`CreateGlyphRunAnalysis` + `GetAlphaTextureBounds` +
+  `CreateAlphaTexture`). It measures the glyph's natural bounds,
+  applies the constraint system via a `DWRITE_MATRIX` transform, and
+  copies grayscale alpha coverage into the atlas. Antialiasing is
+  achieved by rendering with `DWRITE_RENDERING_MODE_NATURAL` and
+  converting the ClearType 3x1 sub-pixel texture to grayscale
+  (`(R+G+B)/3`). Color glyphs (COLR/CBDT/sbix/SVG) return
+  `error.WrongAtlas`.
+- `copyTable`: `IDWriteFontFace::TryGetFontTable`, copying the data
+  before releasing the table context (for HarfBuzz).
+- `getMetrics`: `DWRITE_FONT_METRICS` scaled to pixels, plus ASCII
+  advance measurement for the cell width and the "水" ideograph width.
+- `syntheticBold`/`syntheticItalic`: new faces created with
+  `DWRITE_FONT_SIMULATIONS_BOLD`/`OBLIQUE`.
 
 ### Shaping
 
@@ -157,25 +194,37 @@ enumeration:
 
 ### Build Integration
 
-In `src/build/SharedDeps.zig`, link `dwrite.lib` (or `dwrite.dll`
-via `@extern` declarations; Zig links by `-ldwrite` on Windows targets).
-No vendored C libraries are needed beyond what is already there.
-
-Add `directwrite` to `Backend` in `src/font/backend.zig` and to any
+Done: `src/build/SharedDeps.zig` links `dwrite.lib` and `ole32.lib` for
+the `.directwrite` backend. `Backend.directwrite` is wired into all
 exhaustive switches (`hasFreetype`, `hasHarfbuzz`, etc.). The existing
-`freetype_windows` backend can remain for comparison.
+`freetype_windows` backend remains available for comparison.
 
 ## Migration Path
 
-1. Implement `src/font/directwrite.zig` (COM bindings) and
-   `src/font/face/directwrite.zig` with `Face` methods.
-2. Add `Backend.directwrite`; wire `face.zig` switch.
-3. Reuse `shaper/harfbuzz.zig` (via `copyTable`).
-4. Implement DirectWrite discovery in `discovery.zig`.
-5. Add a build option `-Dfont-backend=directwrite` and make it the
-   Windows default.
-6. Compare rendering output with `freetype_windows`; verify metrics,
-   fallback, variable fonts, and color glyphs.
+- [x] Add `Backend.directwrite`; wire the `face.zig` switch and all other
+  exhaustive `Backend` switches (`library`, `shape`, `discovery`,
+  `DeferredFace`, `Collection` tests).
+- [x] Make `-Dfont-backend=directwrite` a buildable option (the enum value
+  is picked up by `Config.zig` automatically) and link `dwrite.lib` /
+  `ole32.lib`.
+- [x] Add minimal COM bindings (`src/font/directwrite.zig`) and implement
+  the core `Face` methods (`initFile`, `name`, `glyphIndex`, `copyTable`,
+  `hasColor`, `getMetrics`, `setSize`, synthetic bold/italic).
+- [x] Implement `renderGlyph` (rasterization via `CreateGlyphRunAnalysis`
+  + `IDWriteGlyphRunAnalysis`). Known limits: no grayscale antialiasing
+  (only `DWRITE_RENDERING_MODE_ALIASED` produces a 1x1 texture), color
+  glyphs unsupported.
+- [x] Implement in-memory `init` (custom `IDWriteFontFileStream` +
+  `IDWriteFontFileLoader`, registered via `RegisterFontFileLoader`).
+- [x] Implement variable-font `setVariations` (`IDWriteFontFace5` +
+  `IDWriteFontResource::CreateFontFace`).
+- [x] Implement DirectWrite discovery in `discovery.zig` (system font
+  collection; deferred faces hold `IDWriteFont` references).
+- [x] Make `directwrite` the Windows default (`.freetype_windows` remains
+  available via `-Dfont-backend=freetype_windows`).
+- [x] Add grayscale antialiasing (ClearType 3x1 → grayscale conversion).
+- [ ] Compare rendering output with `freetype_windows`; verify metrics,
+  fallback, variable fonts, and color glyphs.
 
 ## Risks
 
@@ -190,15 +239,48 @@ exhaustive switches (`hasFreetype`, `hasHarfbuzz`, etc.). The existing
 
 ## Verification
 
-- Build (once the `-Dfont-backend=directwrite` option is implemented):
-  `zig build -Dtarget=x86_64-windows-gnu -Dapp-runtime=win32 -Dfont-backend=directwrite`
-- Run the app; verify text renders correctly with ClearType.
+- Build: `zig build -Dtarget=x86_64-windows-gnu -Dapp-runtime=win32 -Dfont-backend=directwrite`
+  **passes** (verified with Zig 0.17.0 on Windows).
+- Runtime COM verification: a standalone test confirmed `DWriteCreateFactory`
+  succeeds, `CreateFontFileReference` + `CreateFontFace` load
+  `C:\Windows\Fonts\arial.ttf`, `GetGlyphIndices` maps `'A'` to glyph 36,
+  `GetMetrics` returns sane values (upm=2048, ascent=1854, descent=434),
+  `TryGetFontTable` finds the `cmap` table, and `CreateGlyphRunAnalysis` +
+  `CreateAlphaTexture` produces a 9x12 alpha bitmap for `'A'` with the
+  glyph top 12px above the baseline.
+- Font loading (file and in-memory), metrics, shaping, and grayscale
+  rendering work. Known limits: no antialiasing, color glyphs fail with
+  `error.WrongAtlas`.
+- Runtime verification: an in-memory font (arial.ttf bytes loaded via
+  `CreateCustomFontFileReference` + a custom `IDWriteFontFileStream`)
+  produced correct glyph indices (`'A'` → 36) and metrics (upm=2048).
+- Variable fonts verified with `Bahnschrift.ttf`: `GetFontResource` +
+  `CreateFontFace` with `wght=700` produced a working face
+  (`glyph('A')` = 2).
+- Grayscale antialiasing verified: rendering `'A'` with
+  `DWRITE_RENDERING_MODE_NATURAL` + ClearType 3x1 → grayscale conversion
+  produced 13 distinct alpha values (0..255), confirming antialiasing.
+- System font collection enumeration verified: 85 families enumerated,
+  family names retrieved via `IDWriteLocalizedStrings`.
+- `+list-fonts` verified end-to-end: lists all system fonts, and
+  `+list-fonts --family=Arial` lists the Arial family.
+- Visual comparison with `freetype_windows`: build both variants
+  (`zig build -Dtarget=x86_64-windows-gnu -Dapp-runtime=win32` vs
+  `... -Dfont-backend=freetype_windows`), run the apps, and compare
+  text rendering, metrics, fallback, variable fonts, and color glyphs
+  (color glyphs currently fail on directwrite).
 - Test: CJK fallback, emoji (color font), variable font axes
   (`font-variation-settings`), synthetic bold/italic.
 - Compare `+list-fonts` output with `freetype_windows`.
 
 ## Out of Scope
 
+- **Color glyphs (emoji)**: requires `IDWriteFactory4::TranslateColorGlyphRun`
+  + `IDWriteColorGlyphRunEnumerator` / `IDWriteFontFace2..5` to decompose
+  COLR/CBDT/sbix/SVG glyphs into colored layers. The vendored MinGW
+  `dwrite.h` does not declare these interfaces, so implementing them
+  needs updated headers and an iterative build loop on real Windows SDK.
+- Grayscale antialiasing tuning (sub-pixel ClearType instead of the
+  grayscale conversion) — follow-up.
 - DirectWrite shaping (`shaper/directwrite.zig`) — defer.
-- ClearType tuning via `IDWriteRenderingParams` — follow-up.
 - GDI interop (`IDWriteGdiInterop`) — follow-up.

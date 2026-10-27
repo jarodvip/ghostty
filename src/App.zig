@@ -84,14 +84,17 @@ pub fn create(alloc: Allocator) CreateError!*App {
 
     // If font discovery supports warmup, then we call it. Some font
     // mechanisms (e.g. CoreText) have a multi-millisecond one-time cost
-    // on startup.
-    if (comptime @hasDecl(font.Discover, "warmup")) {
-        if (std.Thread.spawn(
-            .{},
-            font.Discover.warmup,
-            .{},
-        )) |thr| thr.detach() else |err| {
-            log.warn("font warmup thread spawn failed err={}", .{err});
+    // on startup. Backends without discovery (font.Discover == void)
+    // have no warmup.
+    if (comptime font.Discover != void) {
+        if (comptime @hasDecl(font.Discover, "warmup")) {
+            if (std.Thread.spawn(
+                .{},
+                font.Discover.warmup,
+                .{},
+            )) |thr| thr.detach() else |err| {
+                log.warn("font warmup thread spawn failed err={}", .{err});
+            }
         }
     }
 

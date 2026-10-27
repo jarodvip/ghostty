@@ -5,6 +5,7 @@ const options = @import("main.zig").options;
 const config = @import("../config.zig");
 const freetype = @import("face/freetype.zig");
 const coretext = @import("face/coretext.zig");
+const directwrite = @import("face/directwrite.zig");
 pub const web_canvas = @import("face/web_canvas.zig");
 
 /// Face implementation for the compile options.
@@ -14,6 +15,8 @@ pub const Face = switch (options.backend) {
     .fontconfig_freetype,
     .coretext_freetype,
     => freetype.Face,
+
+    .directwrite => directwrite.Face,
 
     .coretext,
     .coretext_harfbuzz,

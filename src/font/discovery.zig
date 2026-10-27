@@ -4,6 +4,7 @@ const Allocator = std.mem.Allocator;
 const assert = @import("../quirks.zig").inlineAssert;
 const fontconfig = @import("fontconfig");
 const macos = @import("macos");
+const dwrite = @import("directwrite.zig");
 const opentype = @import("opentype.zig");
 const options = @import("main.zig").options;
 const Collection = @import("main.zig").Collection;
@@ -20,6 +21,7 @@ const log = std.log.scoped(.discovery);
 pub const Discover = switch (options.backend) {
     .freetype => void, // no discovery
     .freetype_windows => Windows,
+    .directwrite => DirectWrite,
     .fontconfig_freetype => Fontconfig,
     .web_canvas => void, // no discovery
     .coretext,
@@ -1413,3 +1415,169 @@ test "windows" {
     defer face.deinit();
     try testing.expect(face.hasCodepoint('A', null));
 }
+
+/// DirectWrite system font collection discovery.
+pub const DirectWrite = struct {
+    lib: Library,
+
+    pub fn init(lib: Library) DirectWrite {
+        return .{ .lib = lib };
+    }
+
+    pub fn deinit(self: *DirectWrite) void {
+        _ = self;
+    }
+
+    pub fn discover(
+        self: *const DirectWrite,
+        alloc: Allocator,
+        desc: Descriptor,
+    ) !DiscoverIterator {
+        var collection: ?*dwrite.IDWriteFontCollection = null;
+        if (!dwrite.succeeded(self.lib.factory.GetSystemFontCollection(&collection, dwrite.TRUE)))
+            return error.FontconfigNoMatch;
+
+        return .{
+            .alloc = alloc,
+            .collection = collection.?,
+            .desc = desc,
+            .family_index = 0,
+            .font_index = 0,
+        };
+    }
+
+    pub fn discoverFallback(
+        self: *const DirectWrite,
+        alloc: Allocator,
+        collection: *Collection,
+        desc: Descriptor,
+    ) !DiscoverIterator {
+        _ = collection;
+        return self.discover(alloc, desc);
+    }
+
+    pub const DiscoverIterator = struct {
+        alloc: Allocator,
+        collection: *dwrite.IDWriteFontCollection,
+        desc: Descriptor,
+        family_index: u32,
+        font_index: u32,
+
+        pub fn deinit(self: *DiscoverIterator) void {
+            _ = self.collection.Release();
+            self.* = undefined;
+        }
+
+        pub fn next(self: *DiscoverIterator) !?DeferredFace {
+            const family_count = self.collection.GetFontFamilyCount();
+            while (self.family_index < family_count) {
+                const family = (try self.getFontFamily(self.family_index)) orelse {
+                    self.family_index += 1;
+                    self.font_index = 0;
+                    continue;
+                };
+                defer _ = family.Release();
+
+                // If a family name is requested, match it here.
+                const family_matches = try self.familyMatches(family);
+                if (!family_matches) {
+                    self.family_index += 1;
+                    self.font_index = 0;
+                    continue;
+                }
+
+                const font_count = family.GetFontCount();
+                while (self.font_index < font_count) {
+                    const font = (try self.getFont(family, self.font_index)) orelse {
+                        self.font_index += 1;
+                        continue;
+                    };
+                    self.font_index += 1;
+
+                    if (try self.fontMatches(font)) {
+                        // Ownership of the font reference transfers to the
+                        // deferred face.
+                        return try self.makeDeferredFace(font);
+                    }
+                    _ = font.Release();
+                }
+
+                self.family_index += 1;
+                self.font_index = 0;
+            }
+            return null;
+        }
+
+        fn getFontFamily(self: *DiscoverIterator, index: u32) !?*dwrite.IDWriteFontFamily {
+            var family: ?*dwrite.IDWriteFontFamily = null;
+            if (!dwrite.succeeded(self.collection.GetFontFamily(index, &family)))
+                return null;
+            return family;
+        }
+
+        fn getFont(self: *DiscoverIterator, family: *dwrite.IDWriteFontFamily, index: u32) !?*dwrite.IDWriteFont {
+            _ = self;
+            var font: ?*dwrite.IDWriteFont = null;
+            if (!dwrite.succeeded(family.GetFont(index, &font)))
+                return null;
+            return font;
+        }
+
+        fn familyMatches(self: *DiscoverIterator, family: *dwrite.IDWriteFontFamily) !bool {
+            const family_name = self.desc.family orelse return true;
+            var buf: [512]u8 = undefined;
+            const actual = try self.familyName(family, &buf);
+            return std.ascii.eqlIgnoreCase(family_name, actual);
+        }
+
+        fn familyName(self: *DiscoverIterator, family: *dwrite.IDWriteFontFamily, buf: []u8) ![]const u8 {
+            _ = self;
+            var names: ?*dwrite.IDWriteLocalizedStrings = null;
+            if (!dwrite.succeeded(family.GetFamilyNames(&names))) return "";
+            defer _ = names.?.Release();
+
+            const count = names.?.GetCount();
+            if (count == 0) return "";
+
+            var len: u32 = 0;
+            _ = names.?.GetStringLength(0, &len);
+            if (len == 0 or len >= 256) return "";
+
+            var utf16_buf: [256]u16 = undefined;
+            _ = names.?.GetString(0, &utf16_buf, len + 1);
+            const out_len = std.unicode.utf16LeToUtf8(buf, utf16_buf[0..len]) catch return "";
+            return buf[0..out_len];
+        }
+
+        fn fontMatches(self: *DiscoverIterator, font: *dwrite.IDWriteFont) !bool {
+            // Bold/italic style filters.
+            if (self.desc.bold) {
+                const weight = font.GetWeight();
+                if (weight < 700) return false; // DWRITE_FONT_WEIGHT_BOLD
+            }
+            if (self.desc.italic) {
+                const style = font.GetStyle();
+                if (style != 2) return false; // DWRITE_FONT_STYLE_ITALIC
+            }
+
+            // Codepoint support filter.
+            if (self.desc.codepoint > 0) {
+                var exists: dwrite.BOOL = dwrite.FALSE;
+                _ = font.HasCharacter(self.desc.codepoint, &exists);
+                if (exists != dwrite.TRUE) return false;
+            }
+
+            return true;
+        }
+
+        fn makeDeferredFace(self: *DiscoverIterator, font: *dwrite.IDWriteFont) !DeferredFace {
+            var face: DeferredFace = .{};
+            face.dw = .{
+                .font = font,
+                .variations = self.desc.variations,
+                .presentation = .text,
+            };
+            return face;
+        }
+    };
+};

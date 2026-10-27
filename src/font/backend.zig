@@ -12,6 +12,15 @@ pub const Backend = enum {
     /// SFNT name table without any external index.
     freetype_windows,
 
+    /// DirectWrite for font discovery, rendering, and (optionally) shaping
+    /// (Windows). This is the backend described in
+    /// `docs/windows-directwrite.md`. It is wired into the build and
+    /// selectable via `-Dfont-backend=directwrite`. The Face implementation
+    /// at `src/font/face/directwrite.zig` supports loading, metrics, and
+    /// table access; rasterization (`renderGlyph`), in-memory `init`, and
+    /// variable-font axes are still `error.NotImplemented`.
+    directwrite,
+
     /// Fontconfig for font discovery and FreeType for font rendering.
     fontconfig_freetype,
 
@@ -47,11 +56,11 @@ pub const Backend = enum {
         }
 
         if (target.os.tag == .windows) {
-            // Avoid fontconfig on Windows because its libxml2 dependency
-            // may not unpack due to symlinks. Use the FreeType-based
-            // Windows font-directory scanner for discovery. A future
-            // DirectWrite backend can replace this if needed.
-            return .freetype_windows;
+            // DirectWrite is the default Windows font backend: it provides
+            // discovery (system font collection), rendering, and shaping.
+            // The FreeType-based directory scanner remains available via
+            // -Dfont-backend=freetype_windows.
+            return .directwrite;
         }
 
         // macOS also supports "coretext_freetype" but there is no scenario
@@ -71,6 +80,7 @@ pub const Backend = enum {
             .coretext_freetype,
             => true,
 
+            .directwrite,
             .coretext,
             .coretext_harfbuzz,
             .coretext_noshape,
@@ -87,6 +97,7 @@ pub const Backend = enum {
             .coretext_noshape,
             => true,
 
+            .directwrite,
             .freetype,
             .freetype_windows,
             .fontconfig_freetype,
@@ -99,6 +110,7 @@ pub const Backend = enum {
         return switch (self) {
             .fontconfig_freetype => true,
 
+            .directwrite,
             .freetype,
             .freetype_windows,
             .coretext,
@@ -117,6 +129,7 @@ pub const Backend = enum {
             .fontconfig_freetype,
             .coretext_freetype,
             .coretext_harfbuzz,
+            .directwrite,
             => true,
 
             .coretext,
