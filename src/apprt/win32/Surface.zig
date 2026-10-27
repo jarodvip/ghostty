@@ -188,6 +188,15 @@ pub fn destroySurface(self: *Self) void {
 
     self.app.windows_open = self.app.surfaces.items.len > 0;
 
+    // Clear the window user data before freeing the surface so late
+    // messages (e.g. WM_NCDESTROY) cannot dereference a dangling
+    // Surface pointer.
+    _ = win32.user32.SetWindowLongPtrW(
+        self.hwnd,
+        win32.user32.GWLP_USERDATA,
+        0,
+    );
+
     // Deinit the apprt surface (frees the core surface and title) and
     // release the structure. The WndProc must not touch us after this.
     self.deinit();
