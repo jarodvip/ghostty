@@ -982,7 +982,9 @@ jobs:
 
   build-windows:
     runs-on: namespace-profile-ghostty-windows
-    timeout-minutes: 60
+    # The full unit-test suite runs in this job (see "Test Ghostty"),
+    # which needs headroom on top of the app build.
+    timeout-minutes: 90
     needs: test
     steps:
       - name: Checkout code
