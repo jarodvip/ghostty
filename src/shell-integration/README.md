@@ -94,6 +94,29 @@ source /Applications/Ghostty.app/Contents/Resources/ghostty/shell-integration/nu
 use ghostty *
 ```
 
+### PowerShell
+
+For [PowerShell](https://learn.microsoft.com/powershell/) (both Windows
+PowerShell 5.1 `powershell.exe` and PowerShell 7 `pwsh.exe`), Ghostty
+launches the shell with
+`-NoLogo -NoExit -ExecutionPolicy Bypass -EncodedCommand <base64>` so the
+integration script (`powershell/ghostty.ps1`) is dot-sourced before the
+interactive prompt is shown. The encoded command carries no spaces or
+quotes, which keeps the Windows command line intact through Ghostty's
+shell-argument splitting.
+
+The integration wraps the PowerShell `prompt` function to emit terminal
+title (OSC 2) and current-directory (OSC 7) updates when the matching
+shell integration features are enabled.
+
+To load the integration manually from your PowerShell profile:
+
+```powershell
+if ($env:GHOSTTY_RESOURCES_DIR) {
+    . "$env:GHOSTTY_RESOURCES_DIR/shell-integration/powershell/ghostty.ps1"
+}
+```
+
 ### Zsh
 
 Automatic [Zsh](https://www.zsh.org/) integration works by temporarily setting

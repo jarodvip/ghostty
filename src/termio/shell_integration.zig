@@ -16,6 +16,7 @@ pub const Shell = enum {
     elvish,
     fish,
     nushell,
+    powershell,
     zsh,
 };
 
@@ -64,6 +65,12 @@ pub fn setup(
             command,
             resource_dir,
             env,
+        ),
+
+        .powershell => try setupPowershell(
+            alloc_arena,
+            command,
+            resource_dir,
         ),
 
         .zsh => try setupZsh(
@@ -161,6 +168,10 @@ fn detectShell(alloc: Allocator, command: config.Command) !?Shell {
     if (std.mem.eql(u8, "elvish", exe)) return .elvish;
     if (std.mem.eql(u8, "fish", exe)) return .fish;
     if (std.mem.eql(u8, "nu", exe)) return .nushell;
+    if (std.mem.eql(u8, "powershell", exe) or
+        std.mem.eql(u8, "powershell.exe", exe) or
+        std.mem.eql(u8, "pwsh", exe) or
+        std.mem.eql(u8, "pwsh.exe", exe)) return .powershell;
     if (std.mem.eql(u8, "zsh", exe)) return .zsh;
 
     return null;
@@ -175,6 +186,10 @@ test detectShell {
     try testing.expectEqual(.elvish, try detectShell(alloc, .{ .shell = "elvish" }));
     try testing.expectEqual(.fish, try detectShell(alloc, .{ .shell = "fish" }));
     try testing.expectEqual(.nushell, try detectShell(alloc, .{ .shell = "nu" }));
+    try testing.expectEqual(.powershell, try detectShell(alloc, .{ .shell = "powershell" }));
+    try testing.expectEqual(.powershell, try detectShell(alloc, .{ .shell = "powershell.exe" }));
+    try testing.expectEqual(.powershell, try detectShell(alloc, .{ .shell = "pwsh" }));
+    try testing.expectEqual(.powershell, try detectShell(alloc, .{ .shell = "pwsh.exe" }));
     try testing.expectEqual(.zsh, try detectShell(alloc, .{ .shell = "zsh" }));
 
     if (comptime builtin.target.os.tag.isDarwin()) {
@@ -844,6 +859,170 @@ fn setupNushell(
     return .{ .shell = try alloc.dupeSentinel(u8, cmd.buffer.written(), 0) };
 }
 
+/// Setup the PowerShell automatic shell integration. PowerShell has no
+/// rc-file mechanism like bash/zsh, so we launch it with
+/// `-NoLogo -NoExit -Command ". '<integration script>'"` which dot-sources
+/// our integration script before the interactive prompt is shown.
+///
+/// This returns a new (allocated) shell command string that enables the
+/// integration or null if integration failed.
+fn setupPowershell(
+    alloc: Allocator,
+    command: config.Command,
+    resource_dir: []const u8,
+) !?config.Command {
+    var stack_fallback_buf: [4096]u8 = undefined;
+    var stack_fallback: std.heap.BufferFirstAllocator = .init(&stack_fallback_buf, alloc);
+    var cmd = internal_os.shell.ShellCommandBuilder.init(stack_fallback.allocator());
+    defer cmd.deinit();
+
+    // Iterator that yields each argument in the original command line.
+    var iter = try command.argIterator(alloc);
+    defer iter.deinit();
+
+    // Start accumulating arguments with the executable.
+    if (iter.next()) |exe| {
+        try cmd.appendArg(exe);
+    } else return null;
+
+    // Walk through the rest of the given arguments. If we see an option
+    // that would conflict with our `-Command` injection or that is
+    // non-interactive, we bail out and skip loading our shell integration.
+    // Users can still manually source the integration script from $PROFILE.
+    //
+    // Unsupported options:
+    //  -Command / -EncodedCommand  Non-interactive or overrides our -Command
+    //  -File                      Runs a script file, not interactive
+    //  -c                         -c is always non-interactive
+    while (iter.next()) |arg| {
+        if (std.ascii.eqlIgnoreCase(arg, "-command") or
+            std.ascii.eqlIgnoreCase(arg, "-encodedcommand") or
+            std.ascii.eqlIgnoreCase(arg, "-file"))
+        {
+            return null;
+        } else if (arg.len > 1 and arg[0] == '-' and arg[1] != '-') {
+            if (std.mem.indexOfScalar(u8, arg, 'c') != null) {
+                return null;
+            }
+            try cmd.appendArg(arg);
+        } else if (std.mem.eql(u8, arg, "-") or std.mem.eql(u8, arg, "--")) {
+            // All remaining arguments should be passed directly to the shell
+            // command. We shouldn't perform any further option processing.
+            try cmd.appendArg(arg);
+            while (iter.next()) |remaining_arg| {
+                try cmd.appendArg(remaining_arg);
+            }
+            break;
+        } else {
+            try cmd.appendArg(arg);
+        }
+    }
+
+    // Check that our integration script exists before referencing it.
+    var script_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const script_path = try std.mem.print(
+        &script_path_buf,
+        "{s}/shell-integration/powershell/ghostty.ps1",
+        .{resource_dir},
+    );
+    if (std.Io.Dir.openFileAbsolute(global.io(), script_path, .{})) |file| {
+        file.close(global.io());
+    } else |err| {
+        log.warn("unable to open {s}: {}", .{ script_path, err });
+        return null;
+    }
+
+    // Inject the integration script via `-EncodedCommand` (UTF-16LE +
+    // base64). Unlike `-Command`, the encoded payload contains no spaces or
+    // quotes, so it survives Ghostty's shell-arg splitting and Windows
+    // command-line reconstruction as a single argument.
+    try cmd.appendArg("-NoLogo");
+    try cmd.appendArg("-NoExit");
+    try cmd.appendArg("-ExecutionPolicy");
+    try cmd.appendArg("Bypass");
+    try cmd.appendArg("-EncodedCommand");
+    const encoded = try powershellEncodedCommand(alloc, script_path);
+    try cmd.appendArg(encoded);
+
+    // Return a copy of our modified command line to use as the shell command.
+    return .{ .shell = try alloc.dupeSentinel(u8, cmd.buffer.written(), 0) };
+}
+
+/// Build the PowerShell `-EncodedCommand` payload that dot-sources the
+/// integration script: `. '<script_path>'` encoded as UTF-16LE then base64.
+fn powershellEncodedCommand(alloc: Allocator, script_path: []const u8) ![]u8 {
+    const ps_command = try std.mem.concat(alloc, u8, &.{ ". '", script_path, "'" });
+    defer alloc.free(ps_command);
+
+    const utf16 = try std.unicode.utf8ToUtf16LeAlloc(alloc, ps_command);
+    defer alloc.free(utf16);
+    const bytes = std.mem.sliceAsBytes(utf16);
+
+    const encoded_len = std.base64.standard.Encoder.calcSize(bytes.len);
+    const encoded = try alloc.alloc(u8, encoded_len);
+    _ = std.base64.standard.Encoder.encode(encoded, bytes);
+    return encoded;
+}
+
+test "powershell" {
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var res: TmpResourcesDir = try .init(.powershell);
+    defer res.deinit();
+
+    const command = try setupPowershell(alloc, .{ .shell = "powershell" }, res.path);
+    const script_path = try std.mem.concat(alloc, u8, &.{ res.shell_path, "/ghostty.ps1" });
+    defer alloc.free(script_path);
+    const encoded = try powershellEncodedCommand(alloc, script_path);
+    defer alloc.free(encoded);
+    const expected = try std.mem.concat(
+        alloc,
+        u8,
+        &.{ "powershell -NoLogo -NoExit -ExecutionPolicy Bypass -EncodedCommand ", encoded },
+    );
+    defer alloc.free(expected);
+    try testing.expectEqualStrings(expected, command.?.shell);
+}
+
+test "powershell: unsupported options" {
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var res: TmpResourcesDir = try .init(.powershell);
+    defer res.deinit();
+
+    const cmdlines = [_][:0]const u8{
+        "powershell -Command exit",
+        "powershell -File script.ps1",
+        "powershell -EncodedCommand ABC=",
+        "pwsh -c script.ps1",
+    };
+
+    for (cmdlines) |cmdline| {
+        try testing.expect(try setupPowershell(alloc, .{ .shell = cmdline }, res.path) == null);
+    }
+}
+
+test "powershell: missing resources" {
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var tmp_dir = testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+
+    const resources_dir = try tmp_dir.dir.realPathFileAlloc(testing.io, ".", alloc);
+    defer alloc.free(resources_dir);
+
+    try testing.expect(try setupPowershell(alloc, .{ .shell = "powershell" }, resources_dir) == null);
+}
+
 test "nushell" {
     const testing = std.testing;
     var arena = ArenaAllocator.init(testing.allocator);
@@ -1039,6 +1218,10 @@ const TmpResourcesDir = struct {
         switch (shell) {
             .bash => try tmp_dir.dir.writeFile(std.testing.io, .{
                 .sub_path = "shell-integration/bash/ghostty.bash",
+                .data = "",
+            }),
+            .powershell => try tmp_dir.dir.writeFile(std.testing.io, .{
+                .sub_path = "shell-integration/powershell/ghostty.ps1",
                 .data = "",
             }),
             else => {},
