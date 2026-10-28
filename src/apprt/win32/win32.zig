@@ -229,6 +229,12 @@ pub const user32 = struct {
     pub extern "user32" fn GetDpiForWindow(hWnd: HWND) UINT;
     pub extern "user32" fn TrackMouseEvent(lpEventTrack: *TRACKMOUSEEVENT) BOOL;
     pub extern "user32" fn GetAsyncKeyState(vKey: i32) i16;
+    pub extern "user32" fn MessageBoxW(
+        hWnd: ?HWND,
+        lpText: [*:0]const u16,
+        lpCaption: [*:0]const u16,
+        uType: UINT,
+    ) c_int;
     pub extern "user32" fn SetWindowLongPtrW(hWnd: HWND, nIndex: c_int, dwNewLong: LONG_PTR) LONG_PTR;
     pub extern "user32" fn GetWindowLongPtrW(hWnd: HWND, nIndex: c_int) LONG_PTR;
     pub extern "user32" fn ToUnicode(
@@ -245,6 +251,12 @@ pub const user32 = struct {
 
     pub const SW_SHOW: c_int = 5;
     pub const SW_HIDE: c_int = 0;
+
+    pub const MB_OK: UINT = 0x00000000;
+    pub const MB_YESNO: UINT = 0x00000004;
+    pub const MB_ICONQUESTION: UINT = 0x00000020;
+    pub const IDYES: c_int = 6;
+    pub const IDNO: c_int = 7;
 
     pub const TRACKMOUSEEVENT = extern struct {
         cbSize: DWORD,

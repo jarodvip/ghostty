@@ -205,7 +205,12 @@ pub fn destroySurface(self: *Self) void {
 
 /// Returns the content scale of the surface.
 pub fn getContentScale(self: *const Self) !apprt.ContentScale {
-    const dpi = win32.user32.GetDpiForWindow(self.hwnd);
+    return contentScale(win32.user32.GetDpiForWindow(self.hwnd));
+}
+
+/// Convert a DPI value to an `apprt.ContentScale` relative to the
+/// platform's default 96 DPI.
+fn contentScale(dpi: u32) apprt.ContentScale {
     const scale: f32 = @floatFromInt(dpi);
     const base: f32 = 96;
     return .{ .x = scale / base, .y = scale / base };
@@ -214,10 +219,7 @@ pub fn getContentScale(self: *const Self) !apprt.ContentScale {
 /// Handle a WM_DPICHANGED message: notify the core surface so font
 /// metrics, padding, and grid layout follow the window's new DPI.
 pub fn dpiChanged(self: *Self, dpi: u32) void {
-    const scale: f32 = @floatFromInt(dpi);
-    const base: f32 = 96;
-    const content_scale: apprt.ContentScale = .{ .x = scale / base, .y = scale / base };
-    self.core().contentScaleCallback(content_scale) catch |err| {
+    self.core().contentScaleCallback(contentScale(dpi)) catch |err| {
         log.warn("failed to update content scale err={}", .{err});
     };
 }
@@ -325,7 +327,13 @@ fn startClipboardJob(self: *Self, state: apprt.ClipboardRequest) !void {
         .hwnd = self.hwnd,
         .req = state,
     };
-    const thread = std.Thread.spawn(.{}, clipboardJobRun, .{job}) catch |err| {
+    // A clipboard read only performs a COM call and UTF-8 conversion; a
+    // modest stack is sufficient (default is 16 MiB reserved).
+    const thread = std.Thread.spawn(
+        .{ .stack_size = 512 * 1024 },
+        clipboardJobRun,
+        .{job},
+    ) catch |err| {
         alloc.destroy(job);
         return err;
     };
@@ -424,11 +432,23 @@ pub fn setClipboard(
     confirm: bool,
 ) !void {
     _ = clipboard_type;
-    // TODO: `confirm` is set when the core asks for user confirmation of
-    // an OSC 52 clipboard write (e.g. `clipboard-write = ask`). The Win32
-    // apprt has no confirmation UI yet, so the write proceeds unconfirmed;
-    // implement a confirmation prompt before honoring `clipboard-write=ask`.
-    _ = confirm;
+
+    // `confirm` is set when the core asks for user confirmation of an
+    // OSC 52 clipboard write (e.g. `clipboard-write = ask`). Show a modal
+    // prompt and skip the write if the user declines.
+    if (confirm) {
+        const text_w = try self.utf16z("Allow this application to write to the clipboard?");
+        defer self.app.alloc.free(text_w);
+        const caption_w = try self.utf16z("Clipboard Access");
+        defer self.app.alloc.free(caption_w);
+        const res = win32.user32.MessageBoxW(
+            self.hwnd,
+            @ptrCast(text_w.ptr),
+            @ptrCast(caption_w.ptr),
+            win32.user32.MB_YESNO | win32.user32.MB_ICONQUESTION,
+        );
+        if (res != win32.user32.IDYES) return;
+    }
 
     // Find a text/plain representation.
     for (contents) |content| {
@@ -439,6 +459,17 @@ pub fn setClipboard(
             return;
         }
     }
+}
+
+/// Convert a UTF-8 string to a heap-allocated, NUL-terminated UTF-16
+/// buffer. The caller owns the returned slice (including the NUL).
+fn utf16z(self: *Self, text: []const u8) ![]u16 {
+    const utf16_src = try std.unicode.utf8ToUtf16LeAlloc(self.app.alloc, text);
+    defer self.app.alloc.free(utf16_src);
+    const utf16 = try self.app.alloc.alloc(u16, utf16_src.len + 1);
+    @memcpy(utf16[0..utf16_src.len], utf16_src);
+    utf16[utf16_src.len] = 0;
+    return utf16;
 }
 
 /// Build the default environment for the terminal child process.
