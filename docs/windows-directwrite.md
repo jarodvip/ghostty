@@ -23,6 +23,9 @@ implements `src/font/face/directwrite.zig` with minimal COM bindings in
 - Discovery uses the system font collection (`GetSystemFontCollection`
   + `IDWriteFontCollection`/`IDWriteFontFamily`/`IDWriteFont`), and
   deferred faces hold an `IDWriteFont` reference; `+list-fonts` works.
+  The collection is queried with `checkForUpdates=FALSE` (cached by
+  DirectWrite), so fonts installed while Ghostty is running are only
+  discovered after an app restart.
 - Grayscale antialiasing is implemented (ClearType 3x1 → grayscale
   conversion); sub-pixel ClearType tuning remains future work.
 

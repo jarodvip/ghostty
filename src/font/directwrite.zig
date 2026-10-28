@@ -10,6 +10,8 @@
 
 const std = @import("std");
 
+const log = std.log.scoped(.directwrite);
+
 /// Win32 BOOL is a 32-bit integer in the C ABI; using `c_int` directly
 /// keeps the vtable bindings ABI-correct regardless of how the Zig
 /// stdlib models `windows.BOOL`.
@@ -689,6 +691,10 @@ pub const IDWriteFontFace = extern struct {
         ) callconv(.winapi) HRESULT,
     };
 
+    pub inline fn AddRef(self: *IDWriteFontFace) u32 {
+        return self.vtbl.base.AddRef(@ptrCast(self));
+    }
+
     pub inline fn Release(self: *IDWriteFontFace) u32 {
         return self.vtbl.base.Release(@ptrCast(self));
     }
@@ -1162,6 +1168,12 @@ pub fn comInit() Error!bool {
     const hr = CoInitializeEx(null, COINIT_MULTITHREADED);
     if (hr < 0 and @as(u32, @bitCast(hr)) != RPC_E_CHANGED_MODE) {
         return error.ComInitFailed;
+    }
+    if (@as(u32, @bitCast(hr)) == RPC_E_CHANGED_MODE) {
+        // The apartment is still usable, but only from the thread that owns
+        // it. This is fine for the current single-threaded DirectWrite
+        // usage; log so embedding regressions are diagnosable.
+        log.warn("COM already initialized on this thread with a different apartment model; using the existing apartment", .{});
     }
     return hr == 0;
 }

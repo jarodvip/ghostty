@@ -36,6 +36,13 @@ pub const Error = error{
 };
 
 /// HarfBuzz C functions not exposed by the Zig binding.
+///
+/// All extern signatures below were checked against the bundled HarfBuzz
+/// 11.0.0 headers (`hb.h`, `hb-face.h`, `hb-font.h`). In particular,
+/// `hb_face_create_for_tables` takes three parameters (reference_table_func,
+/// user_data, destroy) in this version — earlier two-parameter ABI
+/// declarations produced a garbage destroy callback and crashed on face
+/// destruction.
 extern fn hb_face_create(blob: ?*anyopaque, index: c_uint) ?*anyopaque;
 extern fn hb_face_destroy(face: ?*anyopaque) void;
 extern fn hb_font_create(face: ?*anyopaque) ?*anyopaque;
@@ -49,6 +56,7 @@ extern fn hb_font_set_variations(
 extern fn hb_face_create_for_tables(
     reference_table_func: *const fn (face: ?*anyopaque, tag: u32, user_data: ?*anyopaque) callconv(.c) ?*anyopaque,
     user_data: ?*anyopaque,
+    destroy: ?*const fn (user_data: ?*anyopaque) callconv(.c) void,
 ) ?*anyopaque;
 extern fn hb_blob_create(
     data: [*]const u8,
@@ -64,10 +72,26 @@ const HbVariation = extern struct {
     value: f32,
 };
 
-/// Heap table data owned by a HarfBuzz blob created from `copyTable`.
+/// DWrite expects the OpenType tag as a host-endian packed u32 with the
+/// first character in the low byte (DWRITE_MAKE_OPENTYPE_TAG), unlike
+/// HarfBuzz/FreeType which use big-endian tags.
+fn makeOpenTypeTag(tag: *const [4]u8) u32 {
+    return (@as(u32, tag[3]) << 24) |
+        (@as(u32, tag[2]) << 16) |
+        (@as(u32, tag[1]) << 8) |
+        @as(u32, tag[0]);
+}
+
+/// Heap table reference owned by a HarfBuzz blob created from
+/// `hbReferenceTable`. It holds the DirectWrite table context (and a COM
+/// reference on the font face) so the table memory stays valid for the
+/// blob's lifetime; `destroyTableData` releases both when the blob is
+/// destroyed. This gives zero-copy table access instead of duplicating
+/// every table on each shaping lookup.
 const HbTableData = struct {
     alloc: Allocator,
-    data: []u8,
+    font_face: *dwrite.IDWriteFontFace,
+    ctx: ?*anyopaque,
 };
 
 /// Stable user data for `hb_face_create_for_tables`; lives on the heap so
@@ -83,20 +107,11 @@ fn copyTableFromFace(
     font_face: *dwrite.IDWriteFontFace,
     tag: *const [4]u8,
 ) Error!?[]u8 {
-    // DWrite expects the OpenType tag as a host-endian packed u32 with
-    // the first character in the low byte (see DWRITE_MAKE_OPENTYPE_TAG),
-    // unlike HarfBuzz/FreeType which use big-endian tags.
-    const tag_u32 =
-        (@as(u32, tag[3]) << 24) |
-        (@as(u32, tag[2]) << 16) |
-        (@as(u32, tag[1]) << 8) |
-        @as(u32, tag[0]);
-
     var data: ?*const anyopaque = null;
     var size: u32 = 0;
     var ctx: ?*anyopaque = null;
     var exists: dwrite.BOOL = dwrite.FALSE;
-    if (!dwrite.succeeded(font_face.TryGetFontTable(tag_u32, &data, &size, &ctx, &exists)))
+    if (!dwrite.succeeded(font_face.TryGetFontTable(makeOpenTypeTag(tag), &data, &size, &ctx, &exists)))
         return error.DirectWriteFailed;
     defer if (ctx) |c| font_face.ReleaseFontTable(c);
 
@@ -107,7 +122,8 @@ fn copyTableFromFace(
 
 fn destroyTableData(user_data: ?*anyopaque) callconv(.c) void {
     const td: *HbTableData = @ptrCast(@alignCast(user_data.?));
-    td.alloc.free(td.data);
+    if (td.ctx) |ctx| td.font_face.ReleaseFontTable(ctx);
+    _ = td.font_face.Release();
     td.alloc.destroy(td);
 }
 
@@ -120,18 +136,30 @@ fn hbReferenceTable(face: ?*anyopaque, tag: u32, user_data: ?*anyopaque) callcon
         @truncate(tag >> 8),
         @truncate(tag),
     };
-    const table = (copyTableFromFace(ud.alloc, ud.font_face, &tag_bytes) catch return null) orelse
-        return null;
-    if (table.len == 0) return null;
 
+    var data: ?*const anyopaque = null;
+    var size: u32 = 0;
+    var ctx: ?*anyopaque = null;
+    var exists: dwrite.BOOL = dwrite.FALSE;
+    if (!dwrite.succeeded(ud.font_face.TryGetFontTable(makeOpenTypeTag(&tag_bytes), &data, &size, &ctx, &exists)))
+        return null;
+    if (exists != dwrite.TRUE or size == 0 or data == null) {
+        if (ctx) |c| ud.font_face.ReleaseFontTable(c);
+        return null;
+    }
+
+    // Reference the DirectWrite table memory directly (zero copy). Hold a
+    // COM reference on the font face so the table context remains valid
+    // even if setVariations swaps the face before the blob is destroyed.
     const td = ud.alloc.create(HbTableData) catch {
-        ud.alloc.free(table);
+        if (ctx) |c| ud.font_face.ReleaseFontTable(c);
         return null;
     };
-    td.* = .{ .alloc = ud.alloc, .data = table };
+    td.* = .{ .alloc = ud.alloc, .font_face = ud.font_face, .ctx = ctx };
+    _ = ud.font_face.AddRef();
     return hb_blob_create(
-        td.data.ptr,
-        @intCast(td.data.len),
+        @ptrCast(data.?),
+        size,
         1, // HB_MEMORY_MODE_READONLY
         td,
         destroyTableData,
@@ -483,8 +511,13 @@ pub const Face = struct {
 
     /// Returns true if the given glyph ID is colorized.
     ///
-    /// TODO: Determine per-glyph color (COLR base glyph records, CBDT/CBLC
-    /// bitmap presence). Until rendering is implemented, report false.
+    /// Always returns false today: the DirectWrite renderer only produces
+    /// grayscale alpha (`renderGlyph` rejects color atlases with
+    /// `error.WrongAtlas`), so routing a glyph to a color atlas here would
+    /// fail at render time. `hasColor` still reports the font-level color
+    /// capability (COLR/CBDT/sbix/SVG table presence), so callers selecting
+    /// emoji-capable fonts work; once color rendering is implemented,
+    /// this should return true for color glyphs in color fonts.
     pub fn isColorGlyph(self: *const Face, glyph_id: u32) bool {
         _ = self;
         _ = glyph_id;
@@ -757,7 +790,12 @@ pub const Face = struct {
             glyphs.len,
             &metrics,
             dwrite.FALSE,
-        ))) return 0.5 * self.size.pixels();
+        ))) {
+            // The batched call failed (e.g. an unusual font face); fall back
+            // to measuring each present glyph individually. The glyph
+            // indices are already known, so only the metrics calls are redone.
+            return self.measureAsciiWidthPerChar(&glyphs, px_per_unit);
+        }
 
         var max_advance: f64 = 0.0;
         for (glyphs, 0..) |g, i| {
@@ -770,6 +808,27 @@ pub const Face = struct {
         }
 
         // If no ASCII glyph could be measured, fall back to a crude width.
+        if (max_advance == 0.0) max_advance = 0.5 * self.size.pixels();
+        return max_advance;
+    }
+
+    /// Per-character fallback for `measureAsciiWidth`. `glyphs` holds the
+    /// glyph indices already resolved by the batched path (zero = missing
+    /// codepoint), so this only re-runs the per-glyph metric fetches.
+    fn measureAsciiWidthPerChar(self: *const Face, glyphs: *const [95]u16, px_per_unit: f64) f64 {
+        var max_advance: f64 = 0.0;
+        for (glyphs, 0..) |g, i| {
+            if (g == 0) continue;
+            const glyph_ptr: [*]const u16 = @ptrCast(&glyphs[i]);
+            var gm: dwrite.DWRITE_GLYPH_METRICS = undefined;
+            const out: [*]dwrite.DWRITE_GLYPH_METRICS = @ptrCast(&gm);
+            if (!dwrite.succeeded(self.font_face.GetDesignGlyphMetrics(glyph_ptr, 1, out, dwrite.FALSE)))
+                continue;
+            max_advance = @max(
+                max_advance,
+                @as(f64, @floatFromInt(gm.advanceWidth)) * px_per_unit,
+            );
+        }
         if (max_advance == 0.0) max_advance = 0.5 * self.size.pixels();
         return max_advance;
     }
@@ -842,7 +901,9 @@ fn initFaceFromFontFace(
     ud.* = .{ .alloc = lib.alloc, .font_face = font_face };
     result.hb_user_data = ud;
 
-    const hb_face = hb_face_create_for_tables(hbReferenceTable, ud) orelse
+    // HarfBuzz does not take ownership of `ud` (we pass a null destroy
+    // callback and free `ud` ourselves in `Face.deinit`).
+    const hb_face = hb_face_create_for_tables(hbReferenceTable, ud, null) orelse
         return error.HarfbuzzFailed;
     defer hb_face_destroy(hb_face);
 

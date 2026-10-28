@@ -1439,6 +1439,12 @@ test "directwrite: system font collection discovery" {
 
     var buf: [1024]u8 = undefined;
     _ = try face.name(&buf);
+
+    // Exercise the metrics path (including the batched ASCII width
+    // measurement in the DirectWrite face) on a real system font.
+    var loaded = try face.load(lib, .{ .size = .{ .points = 12 } });
+    defer loaded.deinit();
+    _ = loaded.getMetrics();
 }
 
 /// DirectWrite system font collection discovery.
@@ -1640,8 +1646,13 @@ fn localizedString(names: *dwrite.IDWriteLocalizedStrings, buf: []u8) []const u8
     // Guard against overflowing the caller's UTF-8 buffer. `GetString`
     // writes `len + 1` units (string + NUL), so a 512-unit string must
     // also be rejected: it would overflow the 512-unit buffer below.
+    // Returning "" is fail-safe (family mismatch / style not excluded);
+    // log so an unexpectedly long name is diagnosable rather than silent.
     const units: usize = len;
-    if (units >= 512 or units * 3 > buf.len) return "";
+    if (units >= 512 or units * 3 > buf.len) {
+        log.warn("localized string too long ({} UTF-16 units) to fit buffer of {d} bytes; ignoring", .{ units, buf.len });
+        return "";
+    }
 
     var utf16_buf: [512]u16 = undefined;
     _ = names.GetString(0, &utf16_buf, len + 1);
