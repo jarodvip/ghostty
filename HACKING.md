@@ -103,6 +103,24 @@ The resulting executable is `zig-out/bin/ghostty.exe`. Note that
 a named pipe), and `ghostty +new-window`/`+new-tab` single-instance IPC
 commands are supported on Windows.
 
+#### Running the unit tests (MinGW)
+
+```shell
+zig build test -Dtarget=x86_64-windows-gnu -Dapp-runtime=win32
+```
+
+#### Release builds
+
+Release builds require `-Dstrip=false`: Zig's MinGW CRT fails to
+compile with omit-frame-pointer (which is enabled when stripping is on),
+producing a `.seh_ directive must appear within an active frame` error
+in `crtexe.c`. For example:
+
+```shell
+zig build -Dtarget=x86_64-windows-gnu -Dapp-runtime=win32 \
+  -Doptimize=ReleaseFast -Dstrip=false
+```
+
 #### Verifying the MSVC ABI build
 
 Once the Windows SDK is installed, verify the MSVC ABI build end to end:

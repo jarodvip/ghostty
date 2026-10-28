@@ -23,11 +23,14 @@ implements `src/font/face/directwrite.zig` with minimal COM bindings in
 - Discovery uses the system font collection (`GetSystemFontCollection`
   + `IDWriteFontCollection`/`IDWriteFontFamily`/`IDWriteFont`), and
   deferred faces hold an `IDWriteFont` reference; `+list-fonts` works.
-- Grayscale antialiasing remains as future work.
+- Grayscale antialiasing is implemented (ClearType 3x1 → grayscale
+  conversion); sub-pixel ClearType tuning remains future work.
 
-The current Windows default remains the `freetype_windows` backend
-(FreeType rendering + HarfBuzz shaping + a Windows font-directory
-scanner), which is functional.
+DirectWrite is the **Windows default** font backend
+(`Backend.default()` returns `.directwrite` for Windows). The
+`freetype_windows` backend (FreeType rendering + HarfBuzz shaping + a
+Windows font-directory scanner) remains available via
+`-Dfont-backend=freetype_windows`.
 
 ## Motivation
 
@@ -55,6 +58,7 @@ The font subsystem is selected at comptime via
 pub const Backend = enum {
     freetype,
     freetype_windows,
+    directwrite,
     fontconfig_freetype,
     coretext,
     coretext_freetype,
@@ -64,20 +68,24 @@ pub const Backend = enum {
 };
 ```
 
-For Windows, `Backend.default()` returns `.freetype_windows` with a
-comment: "A future DirectWrite backend can replace this if needed."
+For Windows, `Backend.default()` returns `.directwrite`; the
+`freetype_windows` directory scanner remains available via
+`-Dfont-backend=freetype_windows`.
 
 Key modules:
 
 - `src/font/face.zig` — selects `Face` implementation via
-  `switch (options.backend)`; currently `freetype.Face` for all
-  FreeType-based backends.
+  `switch (options.backend)`; `directwrite.Face` on Windows, otherwise
+  `freetype.Face` for FreeType-based backends.
+- `src/font/face/directwrite.zig` — the DirectWrite `Face`
+  implementation.
 - `src/font/face/freetype.zig` — the FreeType `Face` implementation.
-- `src/font/discovery.zig` — font discovery (has `Windows` scanner).
+- `src/font/discovery.zig` — font discovery (has `Windows` scanner and
+  a `DirectWrite` system-collection enumerator).
 - `src/font/shaper/` — shaping: `harfbuzz.zig` (cross-platform),
   `coretext.zig`, `web_canvas.zig`, `noop.zig`.
-- `src/font/DeferredFace.zig` — loads faces lazily; has a `Windows`
-  variant for `freetype_windows`.
+- `src/font/DeferredFace.zig` — loads faces lazily; has `Windows` and
+  `DirectWrite` variants.
 
 The `Face` interface (from `freetype.zig`) that a DirectWrite backend
 must implement:
@@ -211,9 +219,8 @@ exhaustive switches (`hasFreetype`, `hasHarfbuzz`, etc.). The existing
   the core `Face` methods (`initFile`, `name`, `glyphIndex`, `copyTable`,
   `hasColor`, `getMetrics`, `setSize`, synthetic bold/italic).
 - [x] Implement `renderGlyph` (rasterization via `CreateGlyphRunAnalysis`
-  + `IDWriteGlyphRunAnalysis`). Known limits: no grayscale antialiasing
-  (only `DWRITE_RENDERING_MODE_ALIASED` produces a 1x1 texture), color
-  glyphs unsupported.
+  + `IDWriteGlyphRunAnalysis`). Grayscale antialiasing uses the ClearType
+  3x1 texture converted to grayscale; color glyphs are unsupported.
 - [x] Implement in-memory `init` (custom `IDWriteFontFileStream` +
   `IDWriteFontFileLoader`, registered via `RegisterFontFileLoader`).
 - [x] Implement variable-font `setVariations` (`IDWriteFontFace5` +
@@ -249,7 +256,7 @@ exhaustive switches (`hasFreetype`, `hasHarfbuzz`, etc.). The existing
   `CreateAlphaTexture` produces a 9x12 alpha bitmap for `'A'` with the
   glyph top 12px above the baseline.
 - Font loading (file and in-memory), metrics, shaping, and grayscale
-  rendering work. Known limits: no antialiasing, color glyphs fail with
+  rendering work. Known limit: color glyphs fail with
   `error.WrongAtlas`.
 - Runtime verification: an in-memory font (arial.ttf bytes loaded via
   `CreateCustomFontFileReference` + a custom `IDWriteFontFileStream`)

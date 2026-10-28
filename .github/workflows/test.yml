@@ -991,6 +991,12 @@ jobs:
       - name: Setup Zig
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
 
+      # Run the unit tests for the Win32 apprt and the DirectWrite font
+      # backend on Windows, not just cross-compile them (the main `test`
+      # job runs on Linux with -Dapp-runtime=none).
+      - name: Test Ghostty
+        run: zig build test -Dtarget=x86_64-windows-gnu -Dapp-runtime=win32
+
       # Build the full Windows app with the MinGW ABI. The Win32 apprt
       # is the default runtime on Windows.
       - name: Build Ghostty
