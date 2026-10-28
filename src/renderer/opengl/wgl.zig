@@ -15,6 +15,9 @@
 
 const std = @import("std");
 const windows = std.os.windows;
+const global = @import("../../global.zig");
+
+const log = std.log.scoped(.wgl);
 
 pub const BOOL = windows.BOOL;
 pub const DWORD = windows.DWORD;
@@ -259,26 +262,39 @@ pub const Context = struct {
     hglrc: HGLRC,
 
     pub fn create(hdc: HDC) !Context {
-        // wglGetProcAddress only resolves extension functions when a
-        // rendering context is current. Create a temporary legacy context
-        // and make it current so we can query wglCreateContextAttribsARB.
+        // Once the WGL_ARB_create_context entry point has been resolved,
+        // reuse it directly (no current context is needed to create a new
+        // context). This avoids creating a temporary context per surface.
+        if (createContextAttribsQueried()) {
+            if (getCreateContextAttribs()) |proc| {
+                if (proc(hdc, null, &context_attribs)) |hglrc| {
+                    return .{ .hdc = hdc, .hglrc = hglrc };
+                }
+            }
+            // Extension unavailable or creation failed: legacy fallback.
+            return .{
+                .hdc = hdc,
+                .hglrc = opengl32.wglCreateContext(hdc) orelse return error.WGLCreateContextFailed,
+            };
+        }
+
+        // First call: wglGetProcAddress only resolves extension functions
+        // while a rendering context is current, so create a temporary
+        // legacy context and make it current before querying.
         const temp = opengl32.wglCreateContext(hdc) orelse return error.WGLCreateContextFailed;
         if (opengl32.wglMakeCurrent(hdc, temp) == .FALSE) {
             _ = opengl32.wglDeleteContext(temp);
             return error.WGLMakeCurrentFailed;
         }
 
-        // Prefer a 4.3 core profile context via WGL_ARB_create_context;
-        // fall back to the temporary context if the extension is unavailable.
-        const hglrc_opt = createContextAttribs(hdc) catch |err| {
-            _ = opengl32.wglMakeCurrent(null, null);
-            _ = opengl32.wglDeleteContext(temp);
-            return err;
-        };
-        if (hglrc_opt) |hglrc| {
-            _ = opengl32.wglMakeCurrent(null, null);
-            _ = opengl32.wglDeleteContext(temp);
-            return .{ .hdc = hdc, .hglrc = hglrc };
+        queryCreateContextAttribs();
+
+        if (getCreateContextAttribs()) |proc| {
+            if (proc(hdc, null, &context_attribs)) |hglrc| {
+                _ = opengl32.wglMakeCurrent(null, null);
+                _ = opengl32.wglDeleteContext(temp);
+                return .{ .hdc = hdc, .hglrc = hglrc };
+            }
         }
 
         // No ARB extension: the temporary context is already current.
@@ -306,17 +322,52 @@ fn wndProc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) callconv(.winap
     return user32.DefWindowProcW(hwnd, msg, wparam, lparam);
 }
 
-/// Create a WGL context with a 4.3 core profile using
-/// WGL_ARB_create_context if available.
-fn createContextAttribs(hdc: HDC) !?HGLRC {
-    const proc: CreateContextAttribsARB = @ptrCast(
-        opengl32.wglGetProcAddress("wglCreateContextAttribsARB") orelse return null,
+/// Cached WGL_ARB_create_context entry point, resolved once on the first
+/// context creation (which establishes a current context for
+/// wglGetProcAddress). The extension is process-wide, so the pointer stays
+/// valid for the lifetime of the process.
+var create_context_attribs_proc: ?CreateContextAttribsARB = null;
+var create_context_attribs_queried: bool = false;
+var create_context_attribs_mutex: std.Io.Mutex = .init;
+
+/// The 4.3 core profile attribute list used with
+/// wglCreateContextAttribsARB.
+const context_attribs = [_]c_int{
+    WGL_CONTEXT_MAJOR_VERSION_ARB, 4,
+    WGL_CONTEXT_MINOR_VERSION_ARB, 3,
+    WGL_CONTEXT_PROFILE_MASK_ARB,  WGL_CONTEXT_CORE_PROFILE_BIT_ARB,
+    0,
+};
+
+fn createContextAttribsQueried() bool {
+    const io = global.io();
+    create_context_attribs_mutex.lockUncancelable(io);
+    defer create_context_attribs_mutex.unlock(io);
+    return create_context_attribs_queried;
+}
+
+/// Returns the cached WGL_ARB_create_context entry point, or null if the
+/// extension is unavailable. Must be called while a rendering context is
+/// current the first time (wglGetProcAddress requires one).
+fn getCreateContextAttribs() ?CreateContextAttribsARB {
+    const io = global.io();
+    create_context_attribs_mutex.lockUncancelable(io);
+    defer create_context_attribs_mutex.unlock(io);
+    return create_context_attribs_proc;
+}
+
+/// Resolve and cache the WGL_ARB_create_context entry point. The caller
+/// must have a rendering context current on the calling thread.
+fn queryCreateContextAttribs() void {
+    const io = global.io();
+    create_context_attribs_mutex.lockUncancelable(io);
+    defer create_context_attribs_mutex.unlock(io);
+    if (create_context_attribs_queried) return;
+    create_context_attribs_queried = true;
+    create_context_attribs_proc = @ptrCast(
+        opengl32.wglGetProcAddress("wglCreateContextAttribsARB"),
     );
-    const attribs = [_]c_int{
-        WGL_CONTEXT_MAJOR_VERSION_ARB, 4,
-        WGL_CONTEXT_MINOR_VERSION_ARB, 3,
-        WGL_CONTEXT_PROFILE_MASK_ARB,  WGL_CONTEXT_CORE_PROFILE_BIT_ARB,
-        0,
-    };
-    return proc(hdc, null, &attribs);
+    if (create_context_attribs_proc == null) {
+        log.warn("WGL_ARB_create_context not available; using legacy OpenGL context", .{});
+    }
 }
