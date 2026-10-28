@@ -259,12 +259,30 @@ pub const Context = struct {
     hglrc: HGLRC,
 
     pub fn create(hdc: HDC) !Context {
+        // wglGetProcAddress only resolves extension functions when a
+        // rendering context is current. Create a temporary legacy context
+        // and make it current so we can query wglCreateContextAttribsARB.
+        const temp = opengl32.wglCreateContext(hdc) orelse return error.WGLCreateContextFailed;
+        if (opengl32.wglMakeCurrent(hdc, temp) == .FALSE) {
+            _ = opengl32.wglDeleteContext(temp);
+            return error.WGLMakeCurrentFailed;
+        }
+
         // Prefer a 4.3 core profile context via WGL_ARB_create_context;
-        // fall back to wglCreateContext.
-        const hglrc_opt: ?HGLRC = try createContextAttribs(hdc);
-        const hglrc = hglrc_opt orelse
-            (opengl32.wglCreateContext(hdc) orelse return error.WGLCreateContextFailed);
-        return .{ .hdc = hdc, .hglrc = hglrc };
+        // fall back to the temporary context if the extension is unavailable.
+        const hglrc_opt = createContextAttribs(hdc) catch |err| {
+            _ = opengl32.wglMakeCurrent(null, null);
+            _ = opengl32.wglDeleteContext(temp);
+            return err;
+        };
+        if (hglrc_opt) |hglrc| {
+            _ = opengl32.wglMakeCurrent(null, null);
+            _ = opengl32.wglDeleteContext(temp);
+            return .{ .hdc = hdc, .hglrc = hglrc };
+        }
+
+        // No ARB extension: the temporary context is already current.
+        return .{ .hdc = hdc, .hglrc = temp };
     }
 
     pub fn makeCurrent(self: *const Context) !void {

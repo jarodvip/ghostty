@@ -211,6 +211,17 @@ pub fn getContentScale(self: *const Self) !apprt.ContentScale {
     return .{ .x = scale / base, .y = scale / base };
 }
 
+/// Handle a WM_DPICHANGED message: notify the core surface so font
+/// metrics, padding, and grid layout follow the window's new DPI.
+pub fn dpiChanged(self: *Self, dpi: u32) void {
+    const scale: f32 = @floatFromInt(dpi);
+    const base: f32 = 96;
+    const content_scale: apprt.ContentScale = .{ .x = scale / base, .y = scale / base };
+    self.core().contentScaleCallback(content_scale) catch |err| {
+        log.warn("failed to update content scale err={}", .{err});
+    };
+}
+
 /// Returns the size of the surface in pixels.
 pub fn getSize(self: *const Self) !apprt.SurfaceSize {
     var rect: win32.RECT = undefined;
@@ -413,6 +424,10 @@ pub fn setClipboard(
     confirm: bool,
 ) !void {
     _ = clipboard_type;
+    // TODO: `confirm` is set when the core asks for user confirmation of
+    // an OSC 52 clipboard write (e.g. `clipboard-write = ask`). The Win32
+    // apprt has no confirmation UI yet, so the write proceeds unconfirmed;
+    // implement a confirmation prompt before honoring `clipboard-write=ask`.
     _ = confirm;
 
     // Find a text/plain representation.
@@ -497,7 +512,7 @@ fn blitMemory(hdc: win32.HDC, mem: renderer.OpenGL.ExportedFrame.Memory) void {
         .bmiColors = undefined,
     };
 
-    _ = win32.gdi32.SetDIBitsToDevice(
+    if (win32.gdi32.SetDIBitsToDevice(
         hdc,
         0,
         0,
@@ -510,7 +525,9 @@ fn blitMemory(hdc: win32.HDC, mem: renderer.OpenGL.ExportedFrame.Memory) void {
         pixels.ptr,
         &bmi,
         win32.gdi32.DIB_RGB_COLORS,
-    );
+    ) == 0) {
+        log.warn("SetDIBitsToDevice failed to present frame", .{});
+    }
 }
 
 /// Handle a WM_SIZE message.
@@ -523,6 +540,11 @@ pub fn sizeCallback(self: *Self, width: u32, height: u32) !void {
 
 /// Handle a WM_KEYDOWN / WM_SYSKEYDOWN message.
 pub fn keyDown(self: *Self, wparam: win32.WPARAM, lparam: win32.LPARAM) !void {
+    // A physical key press terminates any pending WM_CHAR surrogate
+    // pair; drop a saved high surrogate so it cannot pair with a later,
+    // unrelated low surrogate.
+    self.surrogate_high = null;
+
     const event = keymap.keyEvent(
         .press,
         @intCast(wparam),

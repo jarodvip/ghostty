@@ -695,6 +695,15 @@ fn wndProc(
             return 0;
         },
 
+        win32.WM_DPICHANGED => {
+            if (surface) |s| {
+                // wParam's high word is the new Y-DPI.
+                const dpi: u32 = @intCast((@as(u64, @bitCast(wparam)) >> 16) & 0xFFFF);
+                s.dpiChanged(dpi);
+            }
+            return 0;
+        },
+
         win32.WM_SETFOCUS => {
             if (surface) |s| s.focusCallback(true) catch |err| {
                 log.warn("focus callback failed err={}", .{err});
