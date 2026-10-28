@@ -339,7 +339,7 @@ pub const IDWriteFactory = extern struct {
         ) callconv(.winapi) HRESULT,
     };
 
-        pub inline fn Release(self: *IDWriteFactory) u32 {
+    pub inline fn Release(self: *IDWriteFactory) u32 {
         return self.vtbl.base.Release(@ptrCast(self));
     }
 
@@ -1221,7 +1221,7 @@ pub const E_OUTOFMEMORY: HRESULT = @bitCast(@as(u32, 0x8007000e));
 /// field so the COM `this` pointer can be cast back to this struct.
 pub const MemoryFontFileStream = struct {
     vtbl: *const IDWriteFontFileStream.Vtbl,
-    ref_count: u32,
+    ref_count: std.atomic.Value(u32),
     alloc: std.mem.Allocator,
     data: []const u8,
     loader: *IDWriteFontFileLoader,
@@ -1234,7 +1234,7 @@ pub const MemoryFontFileStream = struct {
         const self = try alloc.create(MemoryFontFileStream);
         self.* = .{
             .vtbl = &vtbl,
-            .ref_count = 1,
+            .ref_count = std.atomic.Value(u32).init(1),
             .alloc = alloc,
             .data = data,
             .loader = loader,
@@ -1280,19 +1280,18 @@ fn memoryStreamQueryInterface(
 
 fn memoryStreamAddRef(self: *IUnknown) callconv(.winapi) u32 {
     const s: *MemoryFontFileStream = @ptrCast(self);
-    s.ref_count += 1;
-    return s.ref_count;
+    return s.ref_count.fetchAdd(1, .monotonic) + 1;
 }
 
 fn memoryStreamRelease(self: *IUnknown) callconv(.winapi) u32 {
     const s: *MemoryFontFileStream = @ptrCast(self);
-    s.ref_count -= 1;
-    if (s.ref_count == 0) {
+    const prev = s.ref_count.fetchSub(1, .acq_rel);
+    if (prev == 1) {
         const alloc = s.alloc;
         alloc.destroy(s);
         return 0;
     }
-    return s.ref_count;
+    return prev - 1;
 }
 
 fn memoryStreamReadFileFragment(
@@ -1335,13 +1334,18 @@ fn memoryStreamGetLastWriteTime(self: *IDWriteFontFileStream, lastWriteTime: *u6
 /// the reference key only needs to be unique (we use the data pointer).
 pub const MemoryFontFileLoader = struct {
     vtbl: *const IDWriteFontFileLoader.Vtbl,
-    ref_count: u32,
+    ref_count: std.atomic.Value(u32),
     alloc: std.mem.Allocator,
     data: []const u8,
 
     pub fn create(alloc: std.mem.Allocator, data: []const u8) !*MemoryFontFileLoader {
         const self = try alloc.create(MemoryFontFileLoader);
-        self.* = .{ .vtbl = &loader_vtbl, .ref_count = 1, .alloc = alloc, .data = data };
+        self.* = .{
+            .vtbl = &loader_vtbl,
+            .ref_count = std.atomic.Value(u32).init(1),
+            .alloc = alloc,
+            .data = data,
+        };
         return self;
     }
 
@@ -1380,19 +1384,18 @@ fn memoryLoaderQueryInterface(
 
 fn memoryLoaderAddRef(self: *IUnknown) callconv(.winapi) u32 {
     const l: *MemoryFontFileLoader = @ptrCast(self);
-    l.ref_count += 1;
-    return l.ref_count;
+    return l.ref_count.fetchAdd(1, .monotonic) + 1;
 }
 
 fn memoryLoaderRelease(self: *IUnknown) callconv(.winapi) u32 {
     const l: *MemoryFontFileLoader = @ptrCast(self);
-    l.ref_count -= 1;
-    if (l.ref_count == 0) {
+    const prev = l.ref_count.fetchSub(1, .acq_rel);
+    if (prev == 1) {
         const alloc = l.alloc;
         alloc.destroy(l);
         return 0;
     }
-    return l.ref_count;
+    return prev - 1;
 }
 
 fn memoryLoaderCreateStreamFromKey(

@@ -14,11 +14,11 @@ pub const Backend = enum {
 
     /// DirectWrite for font discovery, rendering, and (optionally) shaping
     /// (Windows). This is the backend described in
-    /// `docs/windows-directwrite.md`. It is wired into the build and
+    /// `docs/windows-directwrite.md`. It is the Windows default and
     /// selectable via `-Dfont-backend=directwrite`. The Face implementation
-    /// at `src/font/face/directwrite.zig` supports loading, metrics, and
-    /// table access; rasterization (`renderGlyph`), in-memory `init`, and
-    /// variable-font axes are still `error.NotImplemented`.
+    /// at `src/font/face/directwrite.zig` supports loading (file and
+    /// in-memory), metrics, table access, variable-font axes, synthetic
+    /// bold/italic, and grayscale rasterization via `IDWriteGlyphRunAnalysis`.
     directwrite,
 
     /// Fontconfig for font discovery and FreeType for font rendering.

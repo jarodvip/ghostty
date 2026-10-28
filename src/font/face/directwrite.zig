@@ -132,7 +132,7 @@ fn hbReferenceTable(face: ?*anyopaque, tag: u32, user_data: ?*anyopaque) callcon
     return hb_blob_create(
         td.data.ptr,
         @intCast(td.data.len),
-        2, // HB_MEMORY_MODE_READONLY
+        1, // HB_MEMORY_MODE_READONLY
         td,
         destroyTableData,
     );
@@ -336,19 +336,24 @@ pub const Face = struct {
             return error.DirectWriteFailed;
         if (file_count == 0) return error.InvalidFont;
 
-        var files: [1]*dwrite.IDWriteFontFile = undefined;
-        const files_ptr: [*]*dwrite.IDWriteFontFile = @ptrCast(&files);
-        if (!dwrite.succeeded(self.font_face.GetFiles(&file_count, files_ptr)))
+        // GetFiles writes one pointer per referenced font file. Allocate
+        // for the reported count instead of assuming a single file; a
+        // multi-file font face would otherwise overflow a fixed stack buffer.
+        const files = try self.lib.alloc.alloc(*dwrite.IDWriteFontFile, file_count);
+        defer self.lib.alloc.free(files);
+        if (!dwrite.succeeded(self.font_face.GetFiles(&file_count, files.ptr)))
             return error.DirectWriteFailed;
-        defer _ = files[0].Release();
+        defer {
+            for (files[0..file_count]) |f| _ = f.Release();
+        }
 
         const face_index = self.font_face.GetIndex();
 
         var new_face: ?*dwrite.IDWriteFontFace = null;
         if (!dwrite.succeeded(self.lib.factory.CreateFontFace(
             .unknown,
-            1,
-            &files,
+            file_count,
+            files.ptr,
             face_index,
             simulations,
             &new_face,
@@ -398,7 +403,8 @@ pub const Face = struct {
         if (variations.len == 0) return;
 
         var values_buf: [64]dwrite.DWRITE_FONT_AXIS_VALUE = undefined;
-        const count = @min(values_buf.len, variations.len);
+        if (variations.len > values_buf.len) return error.VariableFontUnsupported;
+        const count = variations.len;
         for (variations[0..count], 0..) |v, i| {
             values_buf[i] = .{
                 // DWrite axis tags use DWRITE_MAKE_OPENTYPE_TAG (little-endian
@@ -737,21 +743,29 @@ pub const Face = struct {
     }
 
     /// Measure the widest advance of printable ASCII characters, used as
-    /// the cell width.
+    /// the cell width. All glyph indices and metrics are fetched in two
+    /// batched COM calls rather than one round-trip per character.
     fn measureAsciiWidth(self: *const Face, px_per_unit: f64) f64 {
+        var cps: [95]u32 = undefined;
+        var glyphs: [95]u16 = undefined;
+        for (32..127, 0..) |c, i| cps[i] = @intCast(c);
+        _ = self.font_face.GetGlyphIndices(&cps, cps.len, &glyphs);
+
+        var metrics: [95]dwrite.DWRITE_GLYPH_METRICS = undefined;
+        if (!dwrite.succeeded(self.font_face.GetDesignGlyphMetrics(
+            &glyphs,
+            glyphs.len,
+            &metrics,
+            dwrite.FALSE,
+        ))) return 0.5 * self.size.pixels();
+
         var max_advance: f64 = 0.0;
-        var c: u8 = ' ';
-        while (c < 127) : (c += 1) {
-            const glyph = self.glyphIndex(@intCast(c)) orelse continue;
-            const glyph_id: u16 = @intCast(glyph);
-            const glyphs: [*]const u16 = @ptrCast(&glyph_id);
-            var gm: dwrite.DWRITE_GLYPH_METRICS = undefined;
-            const out: [*]dwrite.DWRITE_GLYPH_METRICS = @ptrCast(&gm);
-            if (!dwrite.succeeded(self.font_face.GetDesignGlyphMetrics(glyphs, 1, out, dwrite.FALSE)))
-                continue;
+        for (glyphs, 0..) |g, i| {
+            // A zero glyph index means the codepoint is unsupported.
+            if (g == 0) continue;
             max_advance = @max(
                 max_advance,
-                @as(f64, @floatFromInt(gm.advanceWidth)) * px_per_unit,
+                @as(f64, @floatFromInt(metrics[i].advanceWidth)) * px_per_unit,
             );
         }
 
@@ -912,9 +926,13 @@ fn parseNameTable(table: []const u8, buf: []u8) Error![]const u8 {
             return utf16beToUtf8(str, buf);
         }
 
-        // Macintosh Roman: fallback, returned as raw bytes.
+        // Macintosh Roman: fallback, copied into the caller's buffer so
+        // it outlives the transient table slice.
         if (platform_id == 1 and encoding_id == 0 and language_id == 0) {
-            fallback = str;
+            if (str.len <= buf.len) {
+                @memcpy(buf[0..str.len], str);
+                fallback = buf[0..str.len];
+            }
         }
     }
 
@@ -934,4 +952,85 @@ fn utf16beToUtf8(str: []const u8, buf: []u8) Error![]const u8 {
 
     const len = std.unicode.utf16LeToUtf8(buf, tmp[0..unit_count]) catch return "";
     return buf[0..len];
+}
+
+test "parseNameTable: Microsoft Unicode family name" {
+    // Build a minimal SFNT 'name' table with one (3,1,0x409,1) record.
+    var table: [64]u8 = undefined;
+    std.mem.writeInt(u16, table[0..2], 0, .big); // format
+    std.mem.writeInt(u16, table[2..4], 1, .big); // count
+    std.mem.writeInt(u16, table[4..6], 18, .big); // string offset
+    // Record: platform=3, encoding=1, language=0x409, nameID=1,
+    // length=16 ("TestFont" as UTF-16BE), offset=0.
+    std.mem.writeInt(u16, table[6..8], 3, .big);
+    std.mem.writeInt(u16, table[8..10], 1, .big);
+    std.mem.writeInt(u16, table[10..12], 0x409, .big);
+    std.mem.writeInt(u16, table[12..14], 1, .big);
+    std.mem.writeInt(u16, table[14..16], 16, .big);
+    std.mem.writeInt(u16, table[16..18], 0, .big);
+    // String "TestFont" in UTF-16BE (ASCII: high byte 0).
+    const name = "TestFont";
+    for (name, 0..) |c, i| {
+        table[18 + i * 2] = 0;
+        table[18 + i * 2 + 1] = c;
+    }
+
+    var buf: [256]u8 = undefined;
+    const result = try parseNameTable(&table, &buf);
+    try std.testing.expectEqualStrings("TestFont", result);
+}
+
+test "parseNameTable: Macintosh Roman fallback is copied into buf" {
+    var table: [64]u8 = undefined;
+    std.mem.writeInt(u16, table[0..2], 0, .big);
+    std.mem.writeInt(u16, table[2..4], 1, .big);
+    std.mem.writeInt(u16, table[4..6], 18, .big);
+    // Record: platform=1, encoding=0, language=0, nameID=1, length=4,
+    // offset=0.
+    std.mem.writeInt(u16, table[6..8], 1, .big);
+    std.mem.writeInt(u16, table[8..10], 0, .big);
+    std.mem.writeInt(u16, table[10..12], 0, .big);
+    std.mem.writeInt(u16, table[12..14], 1, .big);
+    std.mem.writeInt(u16, table[14..16], 4, .big);
+    std.mem.writeInt(u16, table[16..18], 0, .big);
+    @memcpy(table[18..22], "Test");
+
+    var buf: [256]u8 = undefined;
+    const result = try parseNameTable(&table, &buf);
+    try std.testing.expectEqualStrings("Test", result);
+    // The fallback must live in the caller's buffer, not in `table`;
+    // `name()` frees the table copy before the caller uses the result.
+    try std.testing.expect(@intFromPtr(result.ptr) == @intFromPtr(&buf[0]));
+}
+
+test "parseNameTable: prefers Microsoft Unicode over Macintosh" {
+    var table: [64]u8 = undefined;
+    std.mem.writeInt(u16, table[0..2], 0, .big);
+    std.mem.writeInt(u16, table[2..4], 2, .big);
+    std.mem.writeInt(u16, table[4..6], 6 + 24, .big);
+    // Record 0: Mac Roman "Old" (fallback).
+    std.mem.writeInt(u16, table[6..8], 1, .big);
+    std.mem.writeInt(u16, table[8..10], 0, .big);
+    std.mem.writeInt(u16, table[10..12], 0, .big);
+    std.mem.writeInt(u16, table[12..14], 1, .big);
+    std.mem.writeInt(u16, table[14..16], 3, .big);
+    std.mem.writeInt(u16, table[16..18], 0, .big);
+    // Record 1: Microsoft Unicode "New". Length is 6 bytes (3 chars as
+    // UTF-16BE); offset 3 places it after "Old".
+    std.mem.writeInt(u16, table[18..20], 3, .big);
+    std.mem.writeInt(u16, table[20..22], 1, .big);
+    std.mem.writeInt(u16, table[22..24], 0x409, .big);
+    std.mem.writeInt(u16, table[24..26], 1, .big);
+    std.mem.writeInt(u16, table[26..28], 6, .big);
+    std.mem.writeInt(u16, table[28..30], 3, .big);
+    @memcpy(table[30..33], "Old");
+    const new_name = "New";
+    for (new_name, 0..) |c, i| {
+        table[33 + i * 2] = 0;
+        table[33 + i * 2 + 1] = c;
+    }
+
+    var buf: [256]u8 = undefined;
+    const result = try parseNameTable(&table, &buf);
+    try std.testing.expectEqualStrings("New", result);
 }

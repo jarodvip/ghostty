@@ -1416,6 +1416,31 @@ test "windows" {
     try testing.expect(face.hasCodepoint('A', null));
 }
 
+test "directwrite: system font collection discovery" {
+    if (options.backend != .directwrite) return error.SkipZigTest;
+
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var lib = try Library.init(alloc);
+    defer lib.deinit();
+
+    var dw = DirectWrite.init(lib);
+    defer dw.deinit();
+
+    // Enumerate the system font collection. A stock Windows install
+    // always has at least one font family, so no specific family name is
+    // required.
+    var it = try dw.discover(alloc, .{ .size = 12 });
+    defer it.deinit();
+
+    var face = (try it.next()) orelse return error.TestFontNotFound;
+    defer face.deinit();
+
+    var buf: [1024]u8 = undefined;
+    _ = try face.name(&buf);
+}
+
 /// DirectWrite system font collection discovery.
 pub const DirectWrite = struct {
     lib: Library,
@@ -1434,7 +1459,10 @@ pub const DirectWrite = struct {
         desc: Descriptor,
     ) !DiscoverIterator {
         var collection: ?*dwrite.IDWriteFontCollection = null;
-        if (!dwrite.succeeded(self.lib.factory.GetSystemFontCollection(&collection, dwrite.TRUE)))
+        // Pass FALSE for checkForUpdates: the system font collection is
+        // cached by DirectWrite, and passing TRUE forces a re-scan of the
+        // font directory on every discovery (e.g. each fallback lookup).
+        if (!dwrite.succeeded(self.lib.factory.GetSystemFontCollection(&collection, dwrite.FALSE)))
             return error.FontconfigNoMatch;
 
         return .{
@@ -1609,9 +1637,11 @@ fn localizedString(names: *dwrite.IDWriteLocalizedStrings, buf: []u8) []const u8
     if (len == 0) return "";
 
     // UTF-16 units; BMP characters expand to at most 3 UTF-8 bytes each.
-    // Guard against overflowing the caller's UTF-8 buffer.
+    // Guard against overflowing the caller's UTF-8 buffer. `GetString`
+    // writes `len + 1` units (string + NUL), so a 512-unit string must
+    // also be rejected: it would overflow the 512-unit buffer below.
     const units: usize = len;
-    if (units > 512 or units * 3 > buf.len) return "";
+    if (units >= 512 or units * 3 > buf.len) return "";
 
     var utf16_buf: [512]u16 = undefined;
     _ = names.GetString(0, &utf16_buf, len + 1);
